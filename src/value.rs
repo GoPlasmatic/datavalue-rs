@@ -410,7 +410,10 @@ mod tests {
         let dt = DataDateTime::parse("2024-01-15T12:30:45Z").unwrap();
         let v = DataValue::datetime(dt);
         assert!(v.is_datetime());
-        assert_eq!(v.as_datetime().map(|d| d.to_iso_string()).as_deref(), Some("2024-01-15T12:30:45Z"));
+        assert_eq!(
+            v.as_datetime().map(|d| d.to_iso_string()).as_deref(),
+            Some("2024-01-15T12:30:45Z")
+        );
 
         let dur = DataDuration::parse("1d:2h").unwrap();
         let v2 = DataValue::duration(dur);
@@ -425,14 +428,10 @@ mod tests {
     #[test]
     fn equality_object_order_insensitive() {
         let arena = Bump::new();
-        let a = arena.alloc_slice_copy(&[
-            ("x", DataValue::from_i64(1)),
-            ("y", DataValue::from_i64(2)),
-        ]);
-        let b = arena.alloc_slice_copy(&[
-            ("y", DataValue::from_i64(2)),
-            ("x", DataValue::from_i64(1)),
-        ]);
+        let a =
+            arena.alloc_slice_copy(&[("x", DataValue::from_i64(1)), ("y", DataValue::from_i64(2))]);
+        let b =
+            arena.alloc_slice_copy(&[("y", DataValue::from_i64(2)), ("x", DataValue::from_i64(1))]);
         assert_eq!(DataValue::Object(a), DataValue::Object(b));
     }
 }

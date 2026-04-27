@@ -4,7 +4,7 @@
 
 use bumpalo::Bump;
 use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
-use datavalue::DataValue;
+use datavalue_rs::DataValue;
 
 const TWITTER: &str = include_str!("twitter.json");
 

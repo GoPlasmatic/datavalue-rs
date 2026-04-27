@@ -14,9 +14,7 @@ use core::marker::PhantomData;
 
 use bumpalo::Bump;
 use bumpalo::collections::Vec as BumpVec;
-use serde::de::{
-    DeserializeSeed, Deserializer, Error as DeError, MapAccess, SeqAccess, Visitor,
-};
+use serde::de::{DeserializeSeed, Deserializer, Error as DeError, MapAccess, SeqAccess, Visitor};
 use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
 
 use crate::number::NumberValue;
@@ -64,7 +62,7 @@ impl Serialize for DataValue<'_> {
 ///
 /// ```ignore
 /// use bumpalo::Bump;
-/// use datavalue::DataValueSeed;
+/// use datavalue_rs::DataValueSeed;
 /// use serde::de::DeserializeSeed;
 ///
 /// let arena = Bump::new();
@@ -363,7 +361,10 @@ mod tests {
         let dt = DataDateTime::parse("2024-01-15T12:30:45Z").unwrap();
         let dur = DataDuration::parse("3d:4h").unwrap();
         let v = DataValue::DateTime(dt);
-        assert_eq!(serde_json::to_string(&v).unwrap(), r#""2024-01-15T12:30:45Z""#);
+        assert_eq!(
+            serde_json::to_string(&v).unwrap(),
+            r#""2024-01-15T12:30:45Z""#
+        );
         let v = DataValue::Duration(dur);
         assert_eq!(serde_json::to_string(&v).unwrap(), r#""3d:4h:0m:0s""#);
     }
@@ -396,6 +397,9 @@ mod tests {
         use crate::datetime::DataDateTime;
         let dt = DataDateTime::parse("2024-01-15T12:30:45Z").unwrap();
         let v = OwnedDataValue::DateTime(dt);
-        assert_eq!(serde_json::to_string(&v).unwrap(), r#""2024-01-15T12:30:45Z""#);
+        assert_eq!(
+            serde_json::to_string(&v).unwrap(),
+            r#""2024-01-15T12:30:45Z""#
+        );
     }
 }

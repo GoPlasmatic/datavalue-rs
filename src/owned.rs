@@ -459,7 +459,10 @@ mod tests {
         let bv = DataValue::DateTime(dt);
         let owned = bv.to_owned();
         assert!(owned.is_datetime());
-        assert_eq!(owned.as_datetime().unwrap().to_iso_string(), "2024-01-15T12:30:45Z");
+        assert_eq!(
+            owned.as_datetime().unwrap().to_iso_string(),
+            "2024-01-15T12:30:45Z"
+        );
         let back = owned.to_arena(&arena);
         assert_eq!(back, bv);
     }

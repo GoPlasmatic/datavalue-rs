@@ -1,4 +1,4 @@
-//! datavalue — bump-allocated JSON value type.
+//! datavalue-rs — bump-allocated JSON value type.
 //!
 //! [`DataValue<'a>`] mirrors the shape of `serde_json::Value`, but every
 //! composite payload (string bytes, array elements, object pairs) lives in
@@ -10,7 +10,7 @@
 //!
 //! ```
 //! use bumpalo::Bump;
-//! use datavalue::DataValue;
+//! use datavalue_rs::DataValue;
 //!
 //! let arena = Bump::new();
 //! let v = DataValue::from_str(r#"{"name":"alice","ages":[30,31]}"#, &arena).unwrap();

@@ -1,0 +1,38 @@
+[package]
+name = "datavalue-rs"
+version = "0.1.0"
+edition = "2024"
+authors = ["Harishankar Narayanan <nharishankar@gmail.com>"]
+license = "Apache-2.0"
+description = "Bump-allocated JSON value type with a built-in zero-copy parser and serde_json-style access API."
+repository = "https://github.com/GoPlasmatic/datavalue-rs"
+readme = "README.md"
+keywords = ["json", "arena", "bump", "parser", "value"]
+categories = ["data-structures", "parser-implementations"]
+
+[features]
+default = []
+# Serde Serialize for DataValue plus a DeserializeSeed adapter that takes a
+# &Bump so DataValue can be deserialized from any serde data format.
+serde = ["dep:serde"]
+# Bidirectional bridge to `serde_json::Value` for boundary interop. Pulls in
+# the `serde` feature implicitly.
+serde_json = ["serde", "dep:serde_json"]
+# DateTime / Duration variants (chrono-backed). Adds DataValue::DateTime and
+# DataValue::Duration, with parse/format/arithmetic helpers on the inner
+# types. Mirrors what `datalogic-rs` exposes today.
+datetime = ["dep:chrono"]
+
+[dependencies]
+bumpalo = { version = "3", features = ["collections"] }
+serde = { version = "1.0", optional = true }
+serde_json = { version = "1.0", optional = true }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"], optional = true }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+serde_json = "1.0"
+
+[[bench]]
+name = "twitter"
+harness = false

@@ -60,17 +60,18 @@ Input throughput; higher is better.
 <!-- BENCH:parse:BEGIN -->
 | Library | twitter (631 KB) | citm (1.65 MB) | canada (2.15 MB) |
 |---|---|---|---|
-| datavalue | 502.56 µs · 1.1703 GiB/s | 1.2449 ms · 1.2921 GiB/s | 4.0508 ms · 529.96 MiB/s |
-| serde_json::Value | 1.3927 ms · 432.45 MiB/s | 2.8604 ms · 575.85 MiB/s | 4.8739 ms · 440.46 MiB/s |
-| simd_json (borrowed) | 520.46 µs · 1.1301 GiB/s | 1.4146 ms · 1.1371 GiB/s | 4.2392 ms · 506.41 MiB/s |
-| simd_json (owned) | 879.50 µs · 684.78 MiB/s | 1.9575 ms · 841.49 MiB/s | 4.2462 ms · 505.57 MiB/s |
-| **sonic_rs::Value** | **296.79 µs · 1.9817 GiB/s** | **688.46 µs · 2.3365 GiB/s** | **1.9487 ms · 1.0758 GiB/s** |
-| json-rust | 838.07 µs · 718.63 MiB/s | 1.9821 ms · 831.04 MiB/s | 3.1849 ms · 674.04 MiB/s |
+| datavalue | 378.10 µs · 1.5555 GiB/s | 1.1181 ms · 1.4387 GiB/s | 3.0734 ms · 698.50 MiB/s |
+| serde_json::Value | 1.2660 ms · 475.71 MiB/s | 2.7261 ms · 604.23 MiB/s | 4.8625 ms · 441.50 MiB/s |
+| simd_json (borrowed) | 532.81 µs · 1.1038 GiB/s | 1.4349 ms · 1.1211 GiB/s | 4.2911 ms · 500.28 MiB/s |
+| simd_json (owned) | 897.51 µs · 671.03 MiB/s | 1.9506 ms · 844.46 MiB/s | 4.2758 ms · 502.08 MiB/s |
+| **sonic_rs::Value** | **296.41 µs · 1.9842 GiB/s** | **690.08 µs · 2.3310 GiB/s** | **1.9588 ms · 1.0703 GiB/s** |
+| json-rust | 841.41 µs · 715.77 MiB/s | 1.9938 ms · 826.15 MiB/s | 3.1948 ms · 671.96 MiB/s |
 <!-- BENCH:parse:END -->
 
 `sonic_rs` wins outright across all three fixtures. `datavalue` parse is
-the second-fastest tier — ahead of both simd_json modes on twitter and
-citm, and roughly tied with simd_json on the float-heavy canada fixture.
+the second-fastest tier — ahead of both simd_json modes on every
+fixture, including the float-heavy canada one (`fast_float2` for the
+f64 path beats stdlib's parser meaningfully on that workload).
 
 ## Serialize — DOM → JSON string
 
@@ -79,18 +80,24 @@ Output throughput; higher is better.
 <!-- BENCH:serialize:BEGIN -->
 | Library | twitter | citm | canada |
 |---|---|---|---|
-| datavalue | 323.85 µs · 1.3427 GiB/s | 418.48 µs · 1.1134 GiB/s | 2.2292 ms · 882.79 MiB/s |
-| serde_json::Value | 348.36 µs · 1.2482 GiB/s | 475.99 µs · 1002.4 MiB/s | 2.4326 ms · 808.97 MiB/s |
-| simd_json (owned) | 299.19 µs · 1.4534 GiB/s | 504.28 µs · 946.14 MiB/s | 2.4866 ms · 791.40 MiB/s |
-| sonic_rs::Value | 301.89 µs · 1.4404 GiB/s | 563.50 µs · 846.72 MiB/s | 3.0113 ms · 653.49 MiB/s |
-| **json-rust** | **293.15 µs · 1.4833 GiB/s** | **403.09 µs · 1.1559 GiB/s** | **1.4443 ms · 1.3306 GiB/s** |
+| **datavalue** | **246.20 µs · 1.7662 GiB/s** | 453.91 µs · 1.0265 GiB/s | 2.5608 ms · 768.47 MiB/s |
+| serde_json::Value | 318.21 µs · 1.3665 GiB/s | 432.21 µs · 1.0780 GiB/s | 2.4719 ms · 796.09 MiB/s |
+| simd_json (owned) | 300.24 µs · 1.4483 GiB/s | 522.74 µs · 912.73 MiB/s | 2.5256 ms · 779.17 MiB/s |
+| sonic_rs::Value | 292.74 µs · 1.4854 GiB/s | 568.57 µs · 839.17 MiB/s | 3.0558 ms · 643.98 MiB/s |
+| **json-rust** | 291.97 µs · 1.4893 GiB/s | **419.88 µs · 1.1097 GiB/s** | **1.5040 ms · 1.2778 GiB/s** |
 <!-- BENCH:serialize:END -->
 
-Tight cluster — emit cost is dominated by string formatting. `datavalue`
-sits in the middle of the pack, ahead of `serde_json`. Serialize is
-treated as a read-only workload (you emit a parsed tree without mutating
-it), so this row uses arena `DataValue` via `serde_json::to_string` over
-its `Serialize` impl.
+`datavalue` leads on twitter and is in the front pack on citm; on
+canada `json-rust` wins by emitting truncated floats (it sacrifices
+round-trip precision for speed), and the rest of the pack — including
+`datavalue`, `serde_json`, and `simd_json` — clusters around 2.5 ms,
+all using `ryu` for f64 formatting. Serialize is treated as a read-only
+workload (you emit a parsed tree without mutating it), so this row
+uses arena `DataValue` via the crate's native
+[`DataValue::to_json_string`] emitter (hand-rolled `ryu` / `itoa` +
+SWAR string-escape, bypassing serde dispatch).
+
+[`DataValue::to_json_string`]: src/emit.rs
 
 ## Access — walk a representative path
 
@@ -103,11 +110,11 @@ Lower is better. Each fixture's walk shape:
 <!-- BENCH:access:BEGIN -->
 | Library | twitter (statuses[].user, retweet_count) | citm (events.* id + subTopicIds) | canada (features[].coordinates[]) |
 |---|---|---|---|
-| **datavalue** | **1.9676 µs** | **886.80 ns** | **181.20 ns** |
-| serde_json::Value | 6.0899 µs | 5.9513 µs | 189.88 ns |
-| simd_json (owned) | 2.9510 µs | 1.2073 µs | 181.51 ns |
-| sonic_rs::Value | 9.3140 µs | 9.7401 µs | 2.3484 µs |
-| json-rust | 5.1677 µs | 4.6620 µs | 218.09 ns |
+| **datavalue** | **1.9194 µs** | **945.89 ns** | 185.22 ns |
+| serde_json::Value | 6.1918 µs | 6.0143 µs | 189.05 ns |
+| **simd_json (owned)** | 2.9618 µs | 1.2010 µs | **181.70 ns** |
+| sonic_rs::Value | 9.3811 µs | 8.5995 µs | 2.1929 µs |
+| json-rust | 5.1550 µs | 3.9216 µs | 213.41 ns |
 <!-- BENCH:access:END -->
 
 `datavalue` leads twitter and citm walks by 3–10×. Notable inversion:
@@ -126,10 +133,10 @@ datavalue-rs variant — see the pairing table at the top.
 <!-- BENCH:mutate:BEGIN -->
 | Library | time | thrpt |
 |---|---|---|
-| OwnedDataValue (clone + mutate) | 283.55 µs | 2.0742 GiB/s |
-| serde_json (clone + mutate) | 378.90 µs | 1.5522 GiB/s |
-| simd_json (clone + mutate) | 289.31 µs | 2.0329 GiB/s |
-| **json-rust (clone + mutate)** | **127.44 µs** | **4.6152 GiB/s** |
+| OwnedDataValue (clone + mutate) | 247.02 µs | 2.3809 GiB/s |
+| serde_json (clone + mutate) | 325.54 µs | 1.8067 GiB/s |
+| simd_json (clone + mutate) | 282.88 µs | 2.0791 GiB/s |
+| **json-rust (clone + mutate)** | **121.24 µs** | **4.8510 GiB/s** |
 <!-- BENCH:mutate:END -->
 
 All four rows clone the DOM at the start of each iteration, then mutate
@@ -151,8 +158,12 @@ fair comparable patch in is a follow-up.
 - `simd_json` requires a mutable byte buffer — each iteration gets a
   fresh `Vec<u8>` via `iter_batched(BatchSize::SmallInput)`, so the bench
   measures parse cost, not buffer reuse.
-- The `datavalue` serialize row goes through `serde_json::to_string` over
-  its `Serialize` impl — the crate doesn't expose a native string emitter.
+- The `datavalue` serialize row goes through `DataValue::to_json_string`
+  — a native emitter that walks the tree directly, formats numbers with
+  `ryu` / `itoa`, and escapes strings via an SWAR scan. The serde-based
+  path (via `serde_json::to_string`) still works (the `Serialize` impl
+  is intact in `src/ser.rs`) and is the right entry point for non-JSON
+  serde sinks like msgpack / flexbuffers.
 - `sonic_rs::Value` and `simd_json::OwnedValue` both implement traits
   from the shared `value-trait` crate, which collide on `sonic_rs::Value`
   with `sonic_rs::JsonValueTrait`. The bench imports `simd_json::prelude`

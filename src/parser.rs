@@ -163,21 +163,41 @@ impl<'a> Parser<'a> {
         let start = self.pos;
         let mut is_float = false;
 
-        if self.bytes[self.pos] == b'-' {
+        // Accumulate the integer as a *negative* i64. This lets the magnitude
+        // reach i64::MIN without wrapping, which a positive accumulator can't.
+        // On overflow we set int_overflowed and stop accumulating; the digit
+        // scan still advances `pos` so the slice for the f64 fallback is right.
+        let neg = if self.bytes[self.pos] == b'-' {
             self.pos += 1;
-        }
-        // Integer part.
+            true
+        } else {
+            false
+        };
+        let mut acc: i64 = 0;
+        let mut int_overflowed = false;
+
         match self.peek()? {
             b'0' => {
                 self.pos += 1;
             }
-            b'1'..=b'9' => {
+            c @ b'1'..=b'9' => {
+                acc = -((c - b'0') as i64);
                 self.pos += 1;
-                while let Some(&c) = self.bytes.get(self.pos) {
-                    if c.is_ascii_digit() {
-                        self.pos += 1;
-                    } else {
-                        break;
+                // 18 digits fit in i64 unconditionally (i64::MAX ≈ 9.22 × 10^18).
+                // Beyond that we tag overflow and let the f64 fallback handle it.
+                let mut digits: u32 = 1;
+                while let Some(&d) = self.bytes.get(self.pos) {
+                    match d {
+                        b'0'..=b'9' => {
+                            if digits < 18 {
+                                acc = acc * 10 - (d - b'0') as i64;
+                                digits += 1;
+                            } else {
+                                int_overflowed = true;
+                            }
+                            self.pos += 1;
+                        }
+                        _ => break,
                     }
                 }
             }
@@ -223,14 +243,18 @@ impl<'a> Parser<'a> {
             }
         }
 
-        let slice = &self.input[start..self.pos];
-        if !is_float {
-            // Integer fast path.
-            if let Ok(i) = slice.parse::<i64>() {
+        if !is_float && !int_overflowed {
+            // `acc` is the negative-accumulated value. If the input was
+            // negative we keep it; otherwise negate. The only failure mode is
+            // acc == i64::MIN with !neg (input "9223372036854775808"), which
+            // overflows positive i64 and falls through to f64.
+            let result = if neg { Some(acc) } else { acc.checked_neg() };
+            if let Some(i) = result {
                 return Ok(DataValue::Number(NumberValue::Integer(i)));
             }
-            // Fall through to f64 on i64 overflow.
         }
+
+        let slice = &self.input[start..self.pos];
         match slice.parse::<f64>() {
             Ok(f) => Ok(DataValue::Number(NumberValue::Float(f))),
             Err(_) => Err(ParseError {
@@ -442,6 +466,16 @@ mod tests {
     fn integer_overflow_falls_to_float() {
         let v = parse("123456789012345678901234567890");
         assert!(v.is_f64());
+    }
+
+    #[test]
+    fn i64_boundaries() {
+        assert_eq!(parse("9223372036854775807").as_i64(), Some(i64::MAX));
+        assert_eq!(parse("-9223372036854775808").as_i64(), Some(i64::MIN));
+        // Just past i64::MAX must demote to f64, not silently wrap.
+        assert!(parse("9223372036854775808").is_f64());
+        // Just past i64::MIN must demote to f64.
+        assert!(parse("-9223372036854775809").is_f64());
     }
 
     #[test]

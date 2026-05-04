@@ -301,7 +301,10 @@ impl<'a> Parser<'a> {
 
         // Bulk SWAR scan: 8 bytes at a time, looking for `"`, `\\`, or any
         // byte < 0x20. The branch-free mask gives us the offset of the first
-        // hit within the window via trailing_zeros / 8.
+        // hit within the window via trailing_zeros / 8. Inlined here rather
+        // than dispatched via a SIMD helper — the call/slice boundary cost
+        // outweighs even NEON's 16-byte stride for the typical mix of short
+        // JSON strings (object keys, IDs).
         while self.pos + 8 <= self.bytes.len() {
             let w = u64::from_le_bytes(self.bytes[self.pos..self.pos + 8].try_into().unwrap());
             let mask = string_terminator_mask(w);

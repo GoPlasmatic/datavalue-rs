@@ -22,6 +22,7 @@ mod emit;
 mod number;
 mod owned;
 mod parser;
+pub mod simd;
 mod value;
 
 #[cfg(feature = "datetime")]

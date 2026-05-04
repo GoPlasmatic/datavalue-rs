@@ -392,7 +392,10 @@ impl<'a> Parser<'a> {
         debug_assert_eq!(self.bytes[self.pos], b'[');
         self.pos += 1;
         self.skip_ws();
-        let mut items: BumpVec<DataValue<'a>> = BumpVec::new_in(self.arena);
+        // Pre-allocate a small capacity. Each grow inside an arena copies the
+        // current contents into a new chunk; for non-empty arrays one bump-up
+        // beats N doublings.
+        let mut items: BumpVec<DataValue<'a>> = BumpVec::with_capacity_in(8, self.arena);
         if let Some(&b']') = self.bytes.get(self.pos) {
             self.pos += 1;
             return Ok(DataValue::Array(items.into_bump_slice()));
@@ -413,7 +416,7 @@ impl<'a> Parser<'a> {
         debug_assert_eq!(self.bytes[self.pos], b'{');
         self.pos += 1;
         self.skip_ws();
-        let mut pairs: BumpVec<(&'a str, DataValue<'a>)> = BumpVec::new_in(self.arena);
+        let mut pairs: BumpVec<(&'a str, DataValue<'a>)> = BumpVec::with_capacity_in(8, self.arena);
         if let Some(&b'}') = self.bytes.get(self.pos) {
             self.pos += 1;
             return Ok(DataValue::Object(pairs.into_bump_slice()));

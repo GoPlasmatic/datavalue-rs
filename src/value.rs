@@ -227,7 +227,49 @@ impl<'a> DataValue<'a> {
     pub fn is_empty(&self) -> Option<bool> {
         self.len().map(|n| n == 0)
     }
+
+    /// Iterate array items. Returns an empty iterator if `self` is not an
+    /// array — same convenience pattern as `json-rust`'s `members`.
+    #[inline]
+    pub fn members(&self) -> core::slice::Iter<'_, DataValue<'a>> {
+        match *self {
+            DataValue::Array(items) => items.iter(),
+            _ => [].iter(),
+        }
+    }
+
+    /// Iterate object entries as `(key, value)` pairs in insertion order.
+    /// Returns an empty iterator if `self` is not an object.
+    #[inline]
+    pub fn entries(&self) -> EntriesIter<'_, 'a> {
+        match *self {
+            DataValue::Object(pairs) => EntriesIter {
+                inner: pairs.iter(),
+            },
+            _ => EntriesIter { inner: [].iter() },
+        }
+    }
 }
+
+/// Iterator over `(key, value)` pairs in a [`DataValue::Object`]. Created
+/// via [`DataValue::entries`].
+pub struct EntriesIter<'v, 'a> {
+    inner: core::slice::Iter<'v, (&'a str, DataValue<'a>)>,
+}
+
+impl<'v, 'a> Iterator for EntriesIter<'v, 'a> {
+    type Item = (&'a str, &'v DataValue<'a>);
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next().map(|(k, v)| (*k, v))
+    }
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
+impl ExactSizeIterator for EntriesIter<'_, '_> {}
 
 impl Default for DataValue<'_> {
     #[inline]

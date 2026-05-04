@@ -193,6 +193,28 @@ impl OwnedDataValue {
         self.len().map(|n| n == 0)
     }
 
+    /// Iterate array items. Returns an empty iterator if `self` is not an
+    /// array.
+    #[inline]
+    pub fn members(&self) -> core::slice::Iter<'_, OwnedDataValue> {
+        match self {
+            OwnedDataValue::Array(items) => items.iter(),
+            _ => [].iter(),
+        }
+    }
+
+    /// Iterate object entries as `(key, value)` pairs in insertion order.
+    /// Returns an empty iterator if `self` is not an object.
+    #[inline]
+    pub fn entries(&self) -> OwnedEntriesIter<'_> {
+        match self {
+            OwnedDataValue::Object(pairs) => OwnedEntriesIter {
+                inner: pairs.iter(),
+            },
+            _ => OwnedEntriesIter { inner: [].iter() },
+        }
+    }
+
     /// Borrow this owned tree into the given arena, returning a
     /// [`DataValue`] view. Strings are arena-allocated copies.
     pub fn to_arena<'a>(&self, arena: &'a Bump) -> DataValue<'a> {
@@ -248,6 +270,26 @@ impl<'a> DataValue<'a> {
         }
     }
 }
+
+/// Iterator over `(key, value)` pairs in an [`OwnedDataValue::Object`].
+/// Created via [`OwnedDataValue::entries`].
+pub struct OwnedEntriesIter<'v> {
+    inner: core::slice::Iter<'v, (String, OwnedDataValue)>,
+}
+
+impl<'v> Iterator for OwnedEntriesIter<'v> {
+    type Item = (&'v str, &'v OwnedDataValue);
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next().map(|(k, v)| (k.as_str(), v))
+    }
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
+impl ExactSizeIterator for OwnedEntriesIter<'_> {}
 
 impl PartialEq for OwnedDataValue {
     fn eq(&self, other: &Self) -> bool {
@@ -368,10 +410,48 @@ impl From<bool> for OwnedDataValue {
         OwnedDataValue::Bool(b)
     }
 }
-impl From<i64> for OwnedDataValue {
+
+macro_rules! from_int {
+    ($($t:ty),*) => {$(
+        impl From<$t> for OwnedDataValue {
+            #[inline]
+            fn from(v: $t) -> Self { OwnedDataValue::from_i64(v as i64) }
+        }
+    )*};
+}
+from_int!(i8, i16, i32, i64, u8, u16, u32);
+
+impl From<u64> for OwnedDataValue {
+    /// Values up to `i64::MAX` stay on the integer path; larger values
+    /// fall back to `f64` (matches the parser / serde visitor behaviour).
     #[inline]
-    fn from(v: i64) -> Self {
-        OwnedDataValue::from_i64(v)
+    fn from(v: u64) -> Self {
+        if v <= i64::MAX as u64 {
+            OwnedDataValue::from_i64(v as i64)
+        } else {
+            // Bypass `from_f64` (which would collapse this whole value back
+            // to Integer with i64 saturation) and construct Float directly.
+            OwnedDataValue::Number(NumberValue::Float(v as f64))
+        }
+    }
+}
+impl From<usize> for OwnedDataValue {
+    #[inline]
+    fn from(v: usize) -> Self {
+        OwnedDataValue::from(v as u64)
+    }
+}
+impl From<isize> for OwnedDataValue {
+    #[inline]
+    fn from(v: isize) -> Self {
+        OwnedDataValue::from_i64(v as i64)
+    }
+}
+
+impl From<f32> for OwnedDataValue {
+    #[inline]
+    fn from(v: f32) -> Self {
+        OwnedDataValue::from_f64(v as f64)
     }
 }
 impl From<f64> for OwnedDataValue {
@@ -380,6 +460,7 @@ impl From<f64> for OwnedDataValue {
         OwnedDataValue::from_f64(v)
     }
 }
+
 impl From<String> for OwnedDataValue {
     #[inline]
     fn from(s: String) -> Self {
@@ -390,6 +471,77 @@ impl From<&str> for OwnedDataValue {
     #[inline]
     fn from(s: &str) -> Self {
         OwnedDataValue::String(s.to_string())
+    }
+}
+impl From<&String> for OwnedDataValue {
+    #[inline]
+    fn from(s: &String) -> Self {
+        OwnedDataValue::String(s.clone())
+    }
+}
+impl From<std::borrow::Cow<'_, str>> for OwnedDataValue {
+    #[inline]
+    fn from(s: std::borrow::Cow<'_, str>) -> Self {
+        OwnedDataValue::String(s.into_owned())
+    }
+}
+
+impl From<()> for OwnedDataValue {
+    #[inline]
+    fn from(_: ()) -> Self {
+        OwnedDataValue::Null
+    }
+}
+
+impl<T: Into<OwnedDataValue>> From<Option<T>> for OwnedDataValue {
+    #[inline]
+    fn from(opt: Option<T>) -> Self {
+        match opt {
+            Some(v) => v.into(),
+            None => OwnedDataValue::Null,
+        }
+    }
+}
+
+impl<T: Into<OwnedDataValue>> From<Vec<T>> for OwnedDataValue {
+    #[inline]
+    fn from(v: Vec<T>) -> Self {
+        OwnedDataValue::Array(v.into_iter().map(Into::into).collect())
+    }
+}
+
+impl<T: Into<OwnedDataValue> + Clone> From<&[T]> for OwnedDataValue {
+    #[inline]
+    fn from(v: &[T]) -> Self {
+        OwnedDataValue::Array(v.iter().cloned().map(Into::into).collect())
+    }
+}
+
+impl<T: Into<OwnedDataValue>, const N: usize> From<[T; N]> for OwnedDataValue {
+    #[inline]
+    fn from(v: [T; N]) -> Self {
+        OwnedDataValue::Array(v.into_iter().map(Into::into).collect())
+    }
+}
+
+impl<K: Into<String>, V: Into<OwnedDataValue>> From<std::collections::HashMap<K, V>>
+    for OwnedDataValue
+{
+    /// Note: `HashMap` iteration order is unspecified, so the resulting
+    /// `Object` has unspecified key order. Equality is by key set, so this
+    /// still round-trips correctly through `PartialEq`.
+    #[inline]
+    fn from(m: std::collections::HashMap<K, V>) -> Self {
+        OwnedDataValue::Object(m.into_iter().map(|(k, v)| (k.into(), v.into())).collect())
+    }
+}
+
+impl<K: Into<String>, V: Into<OwnedDataValue>> From<std::collections::BTreeMap<K, V>>
+    for OwnedDataValue
+{
+    #[inline]
+    fn from(m: std::collections::BTreeMap<K, V>) -> Self {
+        OwnedDataValue::Object(m.into_iter().map(|(k, v)| (k.into(), v.into())).collect())
     }
 }
 

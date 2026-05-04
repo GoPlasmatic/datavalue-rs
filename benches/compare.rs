@@ -118,7 +118,7 @@ fn bench_serialize(c: &mut Criterion) {
 
         group.bench_function("datavalue", |b| {
             b.iter(|| {
-                let s = dv.to_json_string();
+                let s = dv.to_string();
                 black_box(s);
             });
         });

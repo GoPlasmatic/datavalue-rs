@@ -93,11 +93,10 @@ round-trip precision for speed), and the rest of the pack — including
 `datavalue`, `serde_json`, and `simd_json` — clusters around 2.5 ms,
 all using `ryu` for f64 formatting. Serialize is treated as a read-only
 workload (you emit a parsed tree without mutating it), so this row
-uses arena `DataValue` via the crate's native
-[`DataValue::to_json_string`] emitter (hand-rolled `ryu` / `itoa` +
-SWAR string-escape, bypassing serde dispatch).
+uses arena `DataValue` via the crate's native [`Display`] emitter
+(hand-rolled `ryu` / `itoa` + SWAR string-escape, bypassing serde dispatch).
 
-[`DataValue::to_json_string`]: src/emit.rs
+[`Display`]: src/emit.rs
 
 ## Access — walk a representative path
 
@@ -158,10 +157,10 @@ fair comparable patch in is a follow-up.
 - `simd_json` requires a mutable byte buffer — each iteration gets a
   fresh `Vec<u8>` via `iter_batched(BatchSize::SmallInput)`, so the bench
   measures parse cost, not buffer reuse.
-- The `datavalue` serialize row goes through `DataValue::to_json_string`
-  — a native emitter that walks the tree directly, formats numbers with
-  `ryu` / `itoa`, and escapes strings via an SWAR scan. The serde-based
-  path (via `serde_json::to_string`) still works (the `Serialize` impl
+- The `datavalue` serialize row goes through the `Display` impl on
+  `DataValue` — a native emitter that walks the tree directly, formats
+  numbers with `ryu` / `itoa`, and escapes strings via an SWAR scan. The
+  serde-based path (via `serde_json::to_string`) still works (the `Serialize` impl
   is intact in `src/ser.rs`) and is the right entry point for non-JSON
   serde sinks like msgpack / flexbuffers.
 - `sonic_rs::Value` and `simd_json::OwnedValue` both implement traits

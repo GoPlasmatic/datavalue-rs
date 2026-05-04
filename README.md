@@ -25,6 +25,25 @@ let v = DataValue::from_str(r#"{"name":"alice","ages":[30,31]}"#, &arena).unwrap
 assert_eq!(v["name"].as_str(), Some("alice"));
 assert_eq!(v["ages"][1].as_i64(), Some(31));
 assert!(v["missing"].is_null()); // missing key indexes to Null, like serde_json
+
+// Render back to JSON via Display.
+println!("{v}");                    // compact: {"name":"alice","ages":[30,31]}
+println!("{}", v.pretty());         // two-space indent, like serde_json::to_string_pretty
+```
+
+### Building values inline
+
+```rust
+use datavalue_rs::{owned_json, OwnedDataValue};
+
+let user = owned_json!({
+    "name": "alice",
+    "ages": [30, 31],
+    "active": true,
+    "tags": null,
+});
+
+assert_eq!(user["ages"][1].as_i64(), Some(31));
 ```
 
 ## Packages
@@ -47,6 +66,9 @@ assert!(v["missing"].is_null()); // missing key indexes to Null, like serde_json
 - **`serde_json::Value`-Style Access** — `Index`, `get()`, `as_*`/`is_*`, chained indexing returns `Null` on miss.
 - **Owned Counterpart** — `OwnedDataValue` for cases where the value must outlive its arena (caches, return values, global state).
 - **Optional `serde` Integration** — `Serialize` for both forms; `DataValueSeed` (DeserializeSeed) for arena targets, direct `Deserialize` for owned.
+- **Optional `serde_json::Value` Bridge** — direct conversion to/from `serde_json::Value` for boundary interop (no string round-trip).
+- **`Display` + `pretty()`** — `println!("{v}")` emits compact JSON; `v.pretty()` renders the same shape as `serde_json::to_string_pretty`.
+- **`owned_json!` Macro** — `serde_json::json!`-style construction for `OwnedDataValue`.
 - **Optional `datetime` Extension** — `DateTime` / `Duration` variants backed by `chrono`, mirroring `datalogic-rs`.
 
 ## Performance
@@ -99,7 +121,7 @@ required) since there's no arena lifetime to thread.
 | Feature | Default | Description |
 |---------|---------|-------------|
 | `serde` | off | `Serialize` for both forms; `DataValueSeed` (DeserializeSeed) for arena targets; `Deserialize` for `OwnedDataValue`. |
-| `serde_json` | off | Implies `serde`. Pulls in `serde_json` for boundary-bridge use. |
+| `serde_json` | off | Implies `serde`. Bidirectional `From`/`Into` between both value types and `serde_json::Value` (`OwnedDataValue::from_serde_value`, `to_serde_value`, `DataValue::from_serde_value_in`). |
 | `datetime` | off | Adds `DateTime(DataDateTime)` / `Duration(DataDuration)` variants (chrono-backed). Mirrors `datalogic-rs`. |
 
 ## Design Notes

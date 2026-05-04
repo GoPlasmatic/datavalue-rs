@@ -350,9 +350,7 @@ impl<'a> Parser<'a> {
             // extend_from_slice rather than pushing per byte.
             let chunk_start = self.pos;
             while self.pos + 8 <= self.bytes.len() {
-                let w = u64::from_le_bytes(
-                    self.bytes[self.pos..self.pos + 8].try_into().unwrap(),
-                );
+                let w = u64::from_le_bytes(self.bytes[self.pos..self.pos + 8].try_into().unwrap());
                 let mask = string_terminator_mask(w);
                 if mask != 0 {
                     self.pos += (mask.trailing_zeros() / 8) as usize;
@@ -525,7 +523,7 @@ impl<'a> Parser<'a> {
                     self.skip_ws();
                     if self.bump()? != b':' {
                         return Err(
-                            self.err(ParseErrorKind::UnexpectedByte(self.bytes[self.pos - 1])),
+                            self.err(ParseErrorKind::UnexpectedByte(self.bytes[self.pos - 1]))
                         );
                     }
                 }

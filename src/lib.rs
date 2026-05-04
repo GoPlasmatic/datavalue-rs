@@ -31,6 +31,9 @@ mod datetime;
 #[cfg(feature = "serde")]
 mod ser;
 
+#[cfg(feature = "serde_json")]
+mod serde_json_bridge;
+
 pub use number::NumberValue;
 pub use owned::{OwnedDataValue, OwnedValueIndex};
 pub use parser::{ParseError, ParseErrorKind};
@@ -41,3 +44,55 @@ pub use datetime::{DataDateTime, DataDuration};
 
 #[cfg(feature = "serde")]
 pub use ser::DataValueSeed;
+
+pub use emit::Pretty;
+
+/// Construct an [`OwnedDataValue`] from a JSON-shaped literal.
+///
+/// Modeled on `serde_json::json!`. Each `null`, `true`, `false`, array,
+/// or object literal maps to the corresponding variant; any other token
+/// is forwarded through `OwnedDataValue::from(...)` so the [`From`] impls
+/// on this crate (`i32`, `String`, `Vec<T>`, `Option<T>`, `HashMap`, etc.)
+/// determine the variant.
+///
+/// Each array element and each object value must be a single token tree.
+/// Non-trivial expressions need to be parenthesised:
+/// `owned_json!([(1 + 2), (compute())])`.
+///
+/// ```
+/// use datavalue_rs::owned_json;
+///
+/// let v = owned_json!({
+///     "name": "alice",
+///     "ages": [30, 31],
+///     "active": true,
+///     "tags": null,
+/// });
+/// assert_eq!(v["name"].as_str(), Some("alice"));
+/// assert_eq!(v["ages"][1].as_i64(), Some(31));
+/// ```
+#[macro_export]
+macro_rules! owned_json {
+    (null) => { $crate::OwnedDataValue::Null };
+    (true) => { $crate::OwnedDataValue::Bool(true) };
+    (false) => { $crate::OwnedDataValue::Bool(false) };
+
+    ([]) => { $crate::OwnedDataValue::Array(::std::vec::Vec::new()) };
+    ([ $( $elem:tt ),+ $(,)? ]) => {
+        $crate::OwnedDataValue::Array(::std::vec![
+            $( $crate::owned_json!($elem) ),+
+        ])
+    };
+
+    ({}) => { $crate::OwnedDataValue::Object(::std::vec::Vec::new()) };
+    ({ $( $key:tt : $val:tt ),+ $(,)? }) => {
+        $crate::OwnedDataValue::Object(::std::vec![
+            $( (
+                ::std::string::ToString::to_string(&$key),
+                $crate::owned_json!($val),
+            ) ),+
+        ])
+    };
+
+    ($other:expr) => { $crate::OwnedDataValue::from($other) };
+}

@@ -17,9 +17,11 @@ cargo clippy --all-targets --all-features -- -D warnings
 # Single test
 cargo test --all-features parser::tests::string_escapes
 
-# Benchmark (twitter.json fixture lives at benches/twitter.json)
-cargo bench --bench twitter
-cargo bench --bench twitter -- --quick   # short run
+# Cross-library benchmarks (twitter, citm_catalog, canada fixtures live in
+# benches/fixtures/). Compares against serde_json, simd-json, sonic-rs, and
+# json-rust across parse / serialize / access / mutate workloads.
+cargo bench --bench compare --features serde_json
+cargo bench --bench compare --features serde_json -- --quick   # short run
 ```
 
 The crate is published as `datavalue-rs`; the library name auto-converts to `datavalue_rs`. Imports must use the underscored form (`use datavalue_rs::DataValue;`). Doctests, benches, and README all assume that spelling.

@@ -36,7 +36,7 @@ assert!(v["missing"].is_null()); // missing key indexes to Null, like serde_json
 ## Resources
 
 - [Rust API (docs.rs)](https://docs.rs/datavalue-rs)
-- [Benchmarks](#performance)
+- [Benchmarks](BENCHMARKS.md) — full cross-library comparison (parse / serialize / access / mutate × twitter / citm / canada)
 - [datalogic-rs](https://github.com/GoPlasmatic/datalogic-rs) — JSONLogic engine that consumes this crate
 
 ## Key Features
@@ -51,16 +51,18 @@ assert!(v["missing"].is_null()); // missing key indexes to Null, like serde_json
 
 ## Performance
 
-Measured on the 631 KB `twitter.json` fixture from the serde-rs json
+Highlights on the 631 KB `twitter.json` fixture from the serde-rs json
 benchmark suite (release build, single thread, criterion):
 
 | Workload                | datavalue-rs | serde_json   | speedup |
 |-------------------------|--------------|--------------|---------|
-| Parse (fresh arena)     | 1.18 GiB/s   | 0.46 GiB/s   | **2.6×** |
-| Parse (reused arena)    | 1.20 GiB/s   | 0.46 GiB/s   | **2.6×** |
-| Walk all status entries | 1.93 µs      | 6.06 µs      | **3.1×** |
+| Parse                   | 1.17 GiB/s   | 0.43 GiB/s   | **2.7×** |
+| Walk all status entries | 1.97 µs      | 6.09 µs      | **3.1×** |
 
-Reproduce with `cargo bench --bench twitter`.
+Full cross-library numbers (vs. simd-json, sonic-rs, json-rust) across
+twitter / citm_catalog / canada and across parse / serialize / access /
+mutate workloads live in [BENCHMARKS.md](BENCHMARKS.md). Reproduce with
+`cargo bench --bench compare --features serde_json`.
 
 ## Owned Counterpart
 

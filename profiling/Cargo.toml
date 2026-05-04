@@ -1,0 +1,21 @@
+[package]
+name = "profiling"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+datavalue-rs = { path = ".." }
+bumpalo = { version = "3", features = ["collections"] }
+
+[profile.release]
+debug = true
+strip = false
+
+[[bin]]
+name = "profile_parse"
+path = "src/bin/profile_parse.rs"
+
+[[bin]]
+name = "profile_access"
+path = "src/bin/profile_access.rs"

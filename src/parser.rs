@@ -496,11 +496,11 @@ impl<'a> Parser<'a> {
         debug_assert_eq!(self.bytes[self.pos], b'{');
         self.pos += 1;
         self.skip_ws();
-        // Objects in real JSON tend to be smaller (5-15 keys is typical;
-        // outliers like citm events run 6, twitter status objects ~30).
-        // 16 covers the bulk; bigger objects pay one doubling.
+        // Twitter status objects run ~30 keys, so 32 keeps them in their
+        // initial chunk; smaller objects (citm events, ~6 keys) just leave
+        // some unused tail in the arena, which is essentially free.
         let mut pairs: BumpVec<(&'a str, DataValue<'a>)> =
-            BumpVec::with_capacity_in(16, self.arena);
+            BumpVec::with_capacity_in(32, self.arena);
         if let Some(&b'}') = self.bytes.get(self.pos) {
             self.pos += 1;
             return Ok(DataValue::Object(pairs.into_bump_slice()));

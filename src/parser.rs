@@ -254,8 +254,12 @@ impl<'a> Parser<'a> {
             }
         }
 
-        let slice = &self.input[start..self.pos];
-        match slice.parse::<f64>() {
+        // fast-float2 is meaningfully faster than libcore's f64 parser on
+        // float-heavy input (the canada fixture is ~2 MB of floats). The
+        // number literal we just walked is JSON-shaped and is a strict
+        // subset of what the parser accepts.
+        let slice = &self.bytes[start..self.pos];
+        match fast_float2::parse::<f64, _>(slice) {
             Ok(f) => Ok(DataValue::Number(NumberValue::Float(f))),
             Err(_) => Err(ParseError {
                 kind: ParseErrorKind::InvalidNumber,

@@ -58,6 +58,28 @@ impl std::error::Error for ParseError {}
 /// past anything legitimate JSON would produce.
 const MAX_DEPTH: u16 = 256;
 
+const SWAR_ONES: u64 = 0x0101_0101_0101_0101;
+const SWAR_HIGHS: u64 = 0x8080_8080_8080_8080;
+
+/// SWAR scan for the next byte that ends a JSON string fast path: `"`, `\\`,
+/// or any control byte (< 0x20). Returns a mask with the high bit set in the
+/// byte positions that match; the first match (if any) is found via
+/// `trailing_zeros() / 8`. Bytes are interpreted little-endian.
+#[inline(always)]
+fn string_terminator_mask(w: u64) -> u64 {
+    // For "byte equals X", XOR makes the matching byte zero, then
+    // `(z - 0x01..) & !z & 0x80..` highlights any zero-byte position.
+    let q = w ^ (b'"' as u64 * SWAR_ONES);
+    let bs = w ^ (b'\\' as u64 * SWAR_ONES);
+    // For "byte < 0x20", mask off the low 5 bits per byte (`& 0xE0`) and
+    // detect zero bytes — any byte 0x00..=0x1F has its top 3 bits clear.
+    let lo = w & 0xE0E0_E0E0_E0E0_E0E0;
+    let m_q = q.wrapping_sub(SWAR_ONES) & !q;
+    let m_bs = bs.wrapping_sub(SWAR_ONES) & !bs;
+    let m_lo = lo.wrapping_sub(SWAR_ONES) & !lo;
+    (m_q | m_bs | m_lo) & SWAR_HIGHS
+}
+
 impl<'a> DataValue<'a> {
     /// Parse a JSON document into a [`DataValue`] tree allocated in `arena`.
     ///
@@ -277,7 +299,20 @@ impl<'a> Parser<'a> {
         self.pos += 1;
         let start = self.pos;
 
-        // Fast path: scan for terminator or escape without copying.
+        // Bulk SWAR scan: 8 bytes at a time, looking for `"`, `\\`, or any
+        // byte < 0x20. The branch-free mask gives us the offset of the first
+        // hit within the window via trailing_zeros / 8.
+        while self.pos + 8 <= self.bytes.len() {
+            let w = u64::from_le_bytes(self.bytes[self.pos..self.pos + 8].try_into().unwrap());
+            let mask = string_terminator_mask(w);
+            if mask != 0 {
+                self.pos += (mask.trailing_zeros() / 8) as usize;
+                break;
+            }
+            self.pos += 8;
+        }
+
+        // Tail (and post-SWAR-hit) per-byte handling.
         loop {
             let b = match self.bytes.get(self.pos) {
                 Some(&b) => b,
@@ -525,6 +560,37 @@ mod tests {
     fn rejects_bad_escape() {
         let arena = Bump::new();
         assert!(DataValue::from_str(r#""\q""#, &arena).is_err());
+    }
+
+    #[test]
+    fn rejects_unescaped_control_bytes_in_string() {
+        // The SWAR scan must still surface every control byte (0x00..=0x1F),
+        // including ones that fall inside an 8-byte window after several
+        // safe bytes.
+        let arena = Bump::new();
+        for ctl in 0u8..0x20 {
+            // Pad with safe bytes so the control byte lands somewhere in
+            // the bulk-scan path rather than the head.
+            let mut s = Vec::from(b"\"abcdefghijklmnop");
+            s.push(ctl);
+            s.push(b'"');
+            let input = std::str::from_utf8(&s).unwrap();
+            assert!(
+                DataValue::from_str(input, &arena).is_err(),
+                "control byte 0x{ctl:02x} should error",
+            );
+        }
+    }
+
+    #[test]
+    fn long_string_round_trips() {
+        // Force the SWAR loop to fire several iterations and the tail to
+        // take over for the final < 8 bytes.
+        let s = "x".repeat(200);
+        let json = format!("\"{s}\"");
+        let arena = Bump::new();
+        let v = DataValue::from_str(&json, &arena).unwrap();
+        assert_eq!(v.as_str(), Some(s.as_str()));
     }
 
     #[test]

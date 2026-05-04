@@ -455,10 +455,12 @@ impl<'a> Parser<'a> {
         debug_assert_eq!(self.bytes[self.pos], b'[');
         self.pos += 1;
         self.skip_ws();
-        // Pre-allocate a small capacity. Each grow inside an arena copies the
-        // current contents into a new chunk; for non-empty arrays one bump-up
-        // beats N doublings.
-        let mut items: BumpVec<DataValue<'a>> = BumpVec::with_capacity_in(8, self.arena);
+        // Arrays in real JSON often hold many items (twitter's `statuses`
+        // is 100, canada's coordinate rings hit thousands). Reserve a
+        // generous initial capacity — the only "cost" inside an arena is a
+        // few unused slots if the array is short, vs. several memmoves
+        // through the doubling sequence if it's long.
+        let mut items: BumpVec<DataValue<'a>> = BumpVec::with_capacity_in(64, self.arena);
         if let Some(&b']') = self.bytes.get(self.pos) {
             self.pos += 1;
             return Ok(DataValue::Array(items.into_bump_slice()));
@@ -466,11 +468,26 @@ impl<'a> Parser<'a> {
         loop {
             let v = self.parse_value(depth + 1)?;
             items.push(v);
-            self.skip_ws();
-            match self.bump()? {
-                b',' => self.skip_ws(),
-                b']' => return Ok(DataValue::Array(items.into_bump_slice())),
-                other => return Err(self.err(ParseErrorKind::UnexpectedByte(other))),
+            // Most JSON is minified — the byte right after a value is the
+            // separator. Inspect it directly; fall back to the skip_ws +
+            // bump path only when the next byte isn't `,` or `]`.
+            match self.bytes.get(self.pos) {
+                Some(&b',') => {
+                    self.pos += 1;
+                    self.skip_ws();
+                }
+                Some(&b']') => {
+                    self.pos += 1;
+                    return Ok(DataValue::Array(items.into_bump_slice()));
+                }
+                _ => {
+                    self.skip_ws();
+                    match self.bump()? {
+                        b',' => self.skip_ws(),
+                        b']' => return Ok(DataValue::Array(items.into_bump_slice())),
+                        other => return Err(self.err(ParseErrorKind::UnexpectedByte(other))),
+                    }
+                }
             }
         }
     }
@@ -479,29 +496,57 @@ impl<'a> Parser<'a> {
         debug_assert_eq!(self.bytes[self.pos], b'{');
         self.pos += 1;
         self.skip_ws();
-        let mut pairs: BumpVec<(&'a str, DataValue<'a>)> = BumpVec::with_capacity_in(8, self.arena);
+        // Objects in real JSON tend to be smaller (5-15 keys is typical;
+        // outliers like citm events run 6, twitter status objects ~30).
+        // 16 covers the bulk; bigger objects pay one doubling.
+        let mut pairs: BumpVec<(&'a str, DataValue<'a>)> =
+            BumpVec::with_capacity_in(16, self.arena);
         if let Some(&b'}') = self.bytes.get(self.pos) {
             self.pos += 1;
             return Ok(DataValue::Object(pairs.into_bump_slice()));
         }
         loop {
-            self.skip_ws();
+            // Key. After the loop entry / a `,` we already skipped WS.
             if self.peek()? != b'"' {
                 return Err(self.err(ParseErrorKind::UnexpectedByte(self.bytes[self.pos])));
             }
             let key = self.parse_string()?;
-            self.skip_ws();
-            if self.bump()? != b':' {
-                return Err(self.err(ParseErrorKind::UnexpectedByte(self.bytes[self.pos - 1])));
+
+            // Colon. Fast path: byte right after the key is `:` (minified).
+            match self.bytes.get(self.pos) {
+                Some(&b':') => self.pos += 1,
+                _ => {
+                    self.skip_ws();
+                    if self.bump()? != b':' {
+                        return Err(
+                            self.err(ParseErrorKind::UnexpectedByte(self.bytes[self.pos - 1])),
+                        );
+                    }
+                }
             }
-            self.skip_ws();
+
+            // Value. parse_value skips its own leading WS; no skip_ws here.
             let value = self.parse_value(depth + 1)?;
             pairs.push((key, value));
-            self.skip_ws();
-            match self.bump()? {
-                b',' => continue,
-                b'}' => return Ok(DataValue::Object(pairs.into_bump_slice())),
-                other => return Err(self.err(ParseErrorKind::UnexpectedByte(other))),
+
+            // Separator. Same fast path as parse_array.
+            match self.bytes.get(self.pos) {
+                Some(&b',') => {
+                    self.pos += 1;
+                    self.skip_ws();
+                }
+                Some(&b'}') => {
+                    self.pos += 1;
+                    return Ok(DataValue::Object(pairs.into_bump_slice()));
+                }
+                _ => {
+                    self.skip_ws();
+                    match self.bump()? {
+                        b',' => self.skip_ws(),
+                        b'}' => return Ok(DataValue::Object(pairs.into_bump_slice())),
+                        other => return Err(self.err(ParseErrorKind::UnexpectedByte(other))),
+                    }
+                }
             }
         }
     }

@@ -300,6 +300,7 @@ impl<'v> Iterator for OwnedEntriesIter<'v> {
 impl ExactSizeIterator for OwnedEntriesIter<'_> {}
 
 impl PartialEq for OwnedDataValue {
+    #[inline]
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (OwnedDataValue::Null, OwnedDataValue::Null) => true,

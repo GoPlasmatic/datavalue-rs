@@ -173,6 +173,7 @@ impl NumberValue {
 }
 
 impl PartialEq for NumberValue {
+    #[inline]
     fn eq(&self, other: &Self) -> bool {
         match (*self, *other) {
             (NumberValue::Integer(a), NumberValue::Integer(b)) => a == b,

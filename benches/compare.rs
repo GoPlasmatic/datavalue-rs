@@ -6,8 +6,10 @@
 //!
 //! Run with: `cargo bench --bench compare --features serde_json`.
 
+use std::hint::black_box;
+
 use bumpalo::Bump;
-use criterion::{BatchSize, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_main};
 use datavalue_rs::{DataValue, OwnedDataValue};
 // simd_json's prelude is intentionally not imported at module scope: it
 // provides traits (ValueAccess, ValueAsContainer, ...) that also impl on

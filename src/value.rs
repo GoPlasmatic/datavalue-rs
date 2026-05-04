@@ -287,6 +287,7 @@ impl Default for DataValue<'_> {
 }
 
 impl<'a> PartialEq for DataValue<'a> {
+    #[inline]
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (DataValue::Null, DataValue::Null) => true,

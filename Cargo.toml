@@ -33,10 +33,10 @@ serde_json = { version = "1.0", optional = true }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"], optional = true }
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 serde_json = "1.0"
-simd-json = "0.13"
-sonic-rs = "0.3"
+simd-json = "0.17"
+sonic-rs = "0.5"
 json = "0.12"
 
 [[bench]]

@@ -30,7 +30,7 @@ itoa = { version = "1", default-features = false }
 ryu = { version = "1", default-features = false }
 serde = { version = "1.0", default-features = false, features = ["std"], optional = true }
 serde_json = { version = "1.0", default-features = false, features = ["std"], optional = true }
-chrono = { version = "0.4", default-features = false, features = ["std", "clock"], optional = true }
+chrono = { version = "0.4.44", default-features = false, features = ["std", "clock"], optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.8", default-features = false, features = ["html_reports", "cargo_bench_support"] }

@@ -26,6 +26,8 @@ datetime = ["dep:chrono"]
 [dependencies]
 bumpalo = { version = "3", features = ["collections"] }
 fast-float2 = "0.2"
+itoa = "1"
+ryu = "1"
 serde = { version = "1.0", optional = true }
 serde_json = { version = "1.0", optional = true }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"], optional = true }

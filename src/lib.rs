@@ -18,6 +18,7 @@
 //! assert_eq!(v["ages"][1].as_i64(), Some(31));
 //! ```
 
+mod emit;
 mod number;
 mod owned;
 mod parser;

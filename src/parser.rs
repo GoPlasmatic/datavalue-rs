@@ -342,6 +342,31 @@ impl<'a> Parser<'a> {
         out.extend_from_slice(&self.bytes[start..self.pos]);
 
         loop {
+            // Bulk-copy the safe run between escapes. Same SWAR scan as the
+            // fast path, but here we copy each window into `out` in one
+            // extend_from_slice rather than pushing per byte.
+            let chunk_start = self.pos;
+            while self.pos + 8 <= self.bytes.len() {
+                let w = u64::from_le_bytes(
+                    self.bytes[self.pos..self.pos + 8].try_into().unwrap(),
+                );
+                let mask = string_terminator_mask(w);
+                if mask != 0 {
+                    self.pos += (mask.trailing_zeros() / 8) as usize;
+                    break;
+                }
+                self.pos += 8;
+            }
+            while let Some(&b) = self.bytes.get(self.pos) {
+                if matches!(b, b'"' | b'\\') || b < 0x20 {
+                    break;
+                }
+                self.pos += 1;
+            }
+            if self.pos > chunk_start {
+                out.extend_from_slice(&self.bytes[chunk_start..self.pos]);
+            }
+
             let b = match self.bytes.get(self.pos) {
                 Some(&b) => b,
                 None => return Err(self.err(ParseErrorKind::UnexpectedEof)),
@@ -399,11 +424,7 @@ impl<'a> Parser<'a> {
                         _ => return Err(self.err(ParseErrorKind::InvalidEscape)),
                     }
                 }
-                0..=0x1F => return Err(self.err(ParseErrorKind::UnexpectedByte(b))),
-                _ => {
-                    out.push(b);
-                    self.pos += 1;
-                }
+                _ => return Err(self.err(ParseErrorKind::UnexpectedByte(b))),
             }
         }
     }
@@ -580,6 +601,23 @@ mod tests {
                 "control byte 0x{ctl:02x} should error",
             );
         }
+    }
+
+    #[test]
+    fn long_escape_string_round_trips() {
+        // Force the escape slow path's SWAR loop to run several iterations
+        // by interleaving long safe runs with escapes.
+        let mut json = String::from("\"");
+        for _ in 0..10 {
+            json.push_str(&"x".repeat(40));
+            json.push_str(r"\n");
+        }
+        json.push('"');
+        let arena = Bump::new();
+        let v = DataValue::from_str(&json, &arena).unwrap();
+        let s = v.as_str().unwrap();
+        assert_eq!(s.matches('\n').count(), 10);
+        assert!(s.starts_with(&"x".repeat(40)));
     }
 
     #[test]

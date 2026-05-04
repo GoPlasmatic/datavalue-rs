@@ -455,12 +455,13 @@ impl<'a> Parser<'a> {
         debug_assert_eq!(self.bytes[self.pos], b'[');
         self.pos += 1;
         self.skip_ws();
-        // Arrays in real JSON often hold many items (twitter's `statuses`
-        // is 100, canada's coordinate rings hit thousands). Reserve a
-        // generous initial capacity — the only "cost" inside an arena is a
-        // few unused slots if the array is short, vs. several memmoves
-        // through the doubling sequence if it's long.
-        let mut items: BumpVec<DataValue<'a>> = BumpVec::with_capacity_in(64, self.arena);
+        // Keep array initial capacity small (8). Larger values regress
+        // canada serialize by 2× because canada has hundreds of thousands
+        // of 2-element coordinate arrays; over-provisioned slots stay in
+        // the arena and disperse the tree, destroying serialize-traversal
+        // cache locality. The doubling cost on long arrays (twitter's
+        // 100-status array) is dwarfed by the locality cost of high cap.
+        let mut items: BumpVec<DataValue<'a>> = BumpVec::with_capacity_in(8, self.arena);
         if let Some(&b']') = self.bytes.get(self.pos) {
             self.pos += 1;
             return Ok(DataValue::Array(items.into_bump_slice()));
@@ -497,8 +498,13 @@ impl<'a> Parser<'a> {
         self.pos += 1;
         self.skip_ws();
         // Twitter status objects run ~30 keys, so 32 keeps them in their
-        // initial chunk; smaller objects (citm events, ~6 keys) just leave
-        // some unused tail in the arena, which is essentially free.
+        // first chunk; smaller objects (citm events, 5-6 keys) leave some
+        // unused tail. We can't shrink BumpVec capacity in place inside a
+        // bump arena (the unused slots stay between this allocation and
+        // the next), so the choice is a trade-off: too high spreads the
+        // tree across the arena and tanks serialize traversal cache
+        // locality (canada serialize doubles when arrays go to cap 64);
+        // too low forces a realloc + memmove on every grow.
         let mut pairs: BumpVec<(&'a str, DataValue<'a>)> =
             BumpVec::with_capacity_in(32, self.arena);
         if let Some(&b'}') = self.bytes.get(self.pos) {

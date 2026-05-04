@@ -215,6 +215,14 @@ impl OwnedDataValue {
         }
     }
 
+    /// Serialise to a compact JSON string. Equivalent to `format!("{self}")` /
+    /// `self.to_string()` — provided as the conventional name people reach
+    /// for, and so callers don't have to import `std::fmt::Write`.
+    #[inline]
+    pub fn to_json_string(&self) -> String {
+        self.to_string()
+    }
+
     /// Borrow this owned tree into the given arena, returning a
     /// [`DataValue`] view. Strings are arena-allocated copies.
     pub fn to_arena<'a>(&self, arena: &'a Bump) -> DataValue<'a> {
@@ -401,6 +409,55 @@ impl OwnedDataValue {
     #[inline]
     pub fn from_f64(f: f64) -> Self {
         OwnedDataValue::Number(NumberValue::from_f64(f))
+    }
+
+    /// Build an `OwnedDataValue::Array` from anything iterable into values
+    /// that already convert into `OwnedDataValue` (covers all the existing
+    /// `From<bool|i64|f64|String|&str|...>` impls).
+    ///
+    /// ```
+    /// use datavalue_rs::OwnedDataValue;
+    /// let v = OwnedDataValue::array([1, 2, 3]);
+    /// assert_eq!(v[0].as_i64(), Some(1));
+    /// let v = OwnedDataValue::array(["a", "b"]);
+    /// assert_eq!(v[1].as_str(), Some("b"));
+    /// ```
+    pub fn array<I, V>(items: I) -> Self
+    where
+        I: IntoIterator<Item = V>,
+        V: Into<OwnedDataValue>,
+    {
+        OwnedDataValue::Array(items.into_iter().map(Into::into).collect())
+    }
+
+    /// Build an `OwnedDataValue::Object` from `(key, value)` pairs.
+    ///
+    /// ```
+    /// use datavalue_rs::OwnedDataValue;
+    /// let v = OwnedDataValue::object([("type", "NaN"), ("op", "+")]);
+    /// assert_eq!(v["type"].as_str(), Some("NaN"));
+    /// let v = OwnedDataValue::object([("count", 42)]);
+    /// assert_eq!(v["count"].as_i64(), Some(42));
+    /// ```
+    pub fn object<I, K, V>(pairs: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<OwnedDataValue>,
+    {
+        OwnedDataValue::Object(
+            pairs
+                .into_iter()
+                .map(|(k, v)| (k.into(), v.into()))
+                .collect(),
+        )
+    }
+}
+
+impl From<Vec<(String, OwnedDataValue)>> for OwnedDataValue {
+    #[inline]
+    fn from(pairs: Vec<(String, OwnedDataValue)>) -> Self {
+        OwnedDataValue::Object(pairs)
     }
 }
 

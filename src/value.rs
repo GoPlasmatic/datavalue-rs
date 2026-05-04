@@ -249,6 +249,14 @@ impl<'a> DataValue<'a> {
             _ => EntriesIter { inner: [].iter() },
         }
     }
+
+    /// Serialise to a compact JSON string. Equivalent to `format!("{self}")` /
+    /// `self.to_string()` — provided as the conventional name people reach
+    /// for, and so callers don't have to import `std::fmt::Write`.
+    #[inline]
+    pub fn to_json_string(&self) -> String {
+        self.to_string()
+    }
 }
 
 /// Iterator over `(key, value)` pairs in a [`DataValue::Object`]. Created

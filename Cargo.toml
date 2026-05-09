@@ -1,7 +1,11 @@
 [package]
 name = "datavalue-rs"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
+# Edition 2024 stabilised in 1.85; the let-chains in parser.rs / datetime.rs
+# were rewritten to nested-if + `matches!` so the floor stays at 1.85
+# rather than 1.88 (where let-chains stabilised). Bump deliberately.
+rust-version = "1.85"
 authors = ["Harishankar Narayanan <nharishankar@gmail.com>"]
 license = "Apache-2.0"
 description = "Bump-allocated JSON value type with a built-in zero-copy parser and serde_json-style access API."

@@ -242,14 +242,10 @@ impl<'a> Parser<'a> {
             }
         }
         // Exponent.
-        if let Some(&c) = self.bytes.get(self.pos)
-            && (c == b'e' || c == b'E')
-        {
+        if matches!(self.bytes.get(self.pos), Some(b'e' | b'E')) {
             is_float = true;
             self.pos += 1;
-            if let Some(&s) = self.bytes.get(self.pos)
-                && (s == b'+' || s == b'-')
-            {
+            if matches!(self.bytes.get(self.pos), Some(b'+' | b'-')) {
                 self.pos += 1;
             }
             let exp_start = self.pos;

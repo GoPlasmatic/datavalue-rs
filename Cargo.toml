@@ -1,6 +1,6 @@
 [package]
 name = "datavalue-rs"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 # Edition 2024 stabilised in 1.85; the let-chains in parser.rs / datetime.rs
 # were rewritten to nested-if + `matches!` so the floor stays at 1.85

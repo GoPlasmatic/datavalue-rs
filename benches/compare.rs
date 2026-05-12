@@ -487,7 +487,83 @@ fn bench_access_canada(c: &mut Criterion) {
 }
 
 // -----------------------------------------------------------------------------
-// 4. Mutate: increment retweet_count for every status in twitter.json.
+// 4. Convert: OwnedDataValue -> arena-bound DataValue.
+// -----------------------------------------------------------------------------
+//
+// The owned tree is pre-built once per fixture; the bench measures only the
+// cost of materializing an arena-bound view (deep walk, string copies into
+// the arena, array/object allocations). Two variants: a fresh arena per
+// iteration vs. resetting the same arena, mirroring the parse benches.
+
+fn bench_convert_owned_to_arena(c: &mut Criterion) {
+    for (name, input) in FIXTURES {
+        let mut group = c.benchmark_group(format!("convert_owned_to_arena/{name}"));
+        group.throughput(Throughput::Bytes(input.len() as u64));
+
+        let owned = OwnedDataValue::from_json(input).unwrap();
+
+        group.bench_function("to_arena (fresh arena)", |b| {
+            b.iter(|| {
+                let arena = Bump::new();
+                let v = black_box(&owned).to_arena(&arena);
+                black_box(v);
+            });
+        });
+
+        group.bench_function("to_arena (reused arena)", |b| {
+            let mut arena = Bump::new();
+            b.iter(|| {
+                arena.reset();
+                let v = black_box(&owned).to_arena(&arena);
+                black_box(v);
+            });
+        });
+
+        group.finish();
+    }
+}
+
+// -----------------------------------------------------------------------------
+// 5. Convert: serde_json::Value -> OwnedDataValue.
+// -----------------------------------------------------------------------------
+//
+// The bridge has two paths: a borrow form (`From<&SjValue>`) that clones
+// strings, and a move form (`From<SjValue>`) that reuses string buffers.
+// We bench both per fixture so the cost of string cloning is visible. The
+// `serde_json::Value` tree is pre-built once and (for the move form)
+// cloned per iteration via `iter_batched`.
+
+fn bench_convert_sj_to_owned(c: &mut Criterion) {
+    for (name, input) in FIXTURES {
+        let mut group = c.benchmark_group(format!("convert_sj_to_owned/{name}"));
+        group.throughput(Throughput::Bytes(input.len() as u64));
+
+        let sj: serde_json::Value = serde_json::from_str(input).unwrap();
+
+        group.bench_function("From<&SjValue> (clone strings)", |b| {
+            b.iter(|| {
+                let v = OwnedDataValue::from(black_box(&sj));
+                black_box(v);
+            });
+        });
+
+        group.bench_function("From<SjValue> (move strings)", |b| {
+            b.iter_batched(
+                || sj.clone(),
+                |owned_sj| {
+                    let v = OwnedDataValue::from(owned_sj);
+                    black_box(v);
+                },
+                BatchSize::SmallInput,
+            );
+        });
+
+        group.finish();
+    }
+}
+
+// -----------------------------------------------------------------------------
+// 6. Mutate: increment retweet_count for every status in twitter.json.
 // -----------------------------------------------------------------------------
 //
 // Only twitter is exercised here — the patch is a single, well-defined edit
@@ -611,6 +687,8 @@ criterion_group!(
     bench_deserialize,
     bench_serialize,
     bench_access,
+    bench_convert_owned_to_arena,
+    bench_convert_sj_to_owned,
     bench_mutate
 );
 criterion_main!(benches);

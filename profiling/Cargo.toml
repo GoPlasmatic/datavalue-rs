@@ -19,3 +19,19 @@ path = "src/bin/profile_parse.rs"
 [[bin]]
 name = "profile_access"
 path = "src/bin/profile_access.rs"
+
+[[bin]]
+name = "profile_owned_to_arena"
+path = "src/bin/profile_owned_to_arena.rs"
+
+[[bin]]
+name = "profile_sj_to_owned"
+path = "src/bin/profile_sj_to_owned.rs"
+required-features = ["serde_json"]
+
+[features]
+serde_json = ["datavalue-rs/serde_json", "dep:serde_json"]
+
+[dependencies.serde_json]
+version = "1.0"
+optional = true

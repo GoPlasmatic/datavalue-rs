@@ -225,6 +225,12 @@ impl OwnedDataValue {
 
     /// Borrow this owned tree into the given arena, returning a
     /// [`DataValue`] view. Strings are arena-allocated copies.
+    ///
+    /// Array/Object use `alloc_slice_fill_with` rather than
+    /// `bumpalo::Vec::with_capacity_in` + push: one pre-sized arena
+    /// allocation and a tight write loop, skipping the Vec wrapper's
+    /// per-push capacity check and the `Layout::array` validation that
+    /// `RawVec::allocate_in` re-runs for each nested allocation.
     pub fn to_arena<'a>(&self, arena: &'a Bump) -> DataValue<'a> {
         match self {
             OwnedDataValue::Null => DataValue::Null,
@@ -232,18 +238,15 @@ impl OwnedDataValue {
             OwnedDataValue::Number(n) => DataValue::Number(*n),
             OwnedDataValue::String(s) => DataValue::String(arena.alloc_str(s)),
             OwnedDataValue::Array(items) => {
-                let mut buf = bumpalo::collections::Vec::with_capacity_in(items.len(), arena);
-                for v in items {
-                    buf.push(v.to_arena(arena));
-                }
-                DataValue::Array(buf.into_bump_slice())
+                let slice = arena.alloc_slice_fill_with(items.len(), |i| items[i].to_arena(arena));
+                DataValue::Array(slice)
             }
             OwnedDataValue::Object(pairs) => {
-                let mut buf = bumpalo::collections::Vec::with_capacity_in(pairs.len(), arena);
-                for (k, v) in pairs {
-                    buf.push((arena.alloc_str(k) as &str, v.to_arena(arena)));
-                }
-                DataValue::Object(buf.into_bump_slice())
+                let slice = arena.alloc_slice_fill_with(pairs.len(), |i| {
+                    let (k, v) = &pairs[i];
+                    (arena.alloc_str(k) as &str, v.to_arena(arena))
+                });
+                DataValue::Object(slice)
             }
             #[cfg(feature = "datetime")]
             OwnedDataValue::DateTime(d) => DataValue::DateTime(*d),

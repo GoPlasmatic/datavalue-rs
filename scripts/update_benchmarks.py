@@ -132,6 +132,13 @@ def parse_log(text: str) -> dict[tuple[str, str, str], dict[str, str]]:
 
         m = NAME_RE.match(line)
         if not m:
+            # Any other line (an untracked group's bench id like convert_*,
+            # outlier notes, cargo noise) ends the current result block.
+            # Without this reset, a bare `time:` line belonging to an
+            # untracked benchmark overwrites the previous tracked median
+            # (seen as convert_sj_to_owned/canada landing in the
+            # access/canada/json-rust cell).
+            current = None
             continue
         group, fixture, lib = m.group(1), m.group(2), m.group(3).strip()
         current = (group, fixture, lib)

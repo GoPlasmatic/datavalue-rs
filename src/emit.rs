@@ -63,6 +63,48 @@ impl JsonSink for Vec<u8> {
     }
 }
 
+impl JsonSink for bumpalo::collections::Vec<'_, u8> {
+    type Error = core::convert::Infallible;
+    #[inline]
+    fn write_bytes(&mut self, b: &[u8]) -> Result<(), Self::Error> {
+        // Not extend_from_slice: bumpalo's Vec is a pre-specialization std
+        // fork, so its extend_from_slice copies element-by-element through a
+        // cloned iterator (measured ~2x slower on string-heavy emit). Reserve
+        // once and memcpy.
+        self.reserve(b.len());
+        let len = self.len();
+        // SAFETY: `reserve` guarantees capacity for `len + b.len()`; the
+        // source and destination don't overlap (`b` borrows input strings or
+        // static tables, never this vec's buffer).
+        unsafe {
+            core::ptr::copy_nonoverlapping(b.as_ptr(), self.as_mut_ptr().add(len), b.len());
+            self.set_len(len + b.len());
+        }
+        Ok(())
+    }
+    #[inline]
+    fn write_byte(&mut self, b: u8) -> Result<(), Self::Error> {
+        self.push(b);
+        Ok(())
+    }
+}
+
+/// Finish an arena emit: reclaim unused BumpVec capacity, then reinterpret
+/// the bytes as `&str`.
+///
+/// SAFETY (of the contained `from_utf8_unchecked`): the emitters only write
+/// valid UTF-8 — ASCII structural bytes/escapes/numbers and `&str` payload
+/// runs (see the `JsonSink` contract).
+#[inline]
+fn into_arena_str<'b>(mut out: bumpalo::collections::Vec<'b, u8>) -> &'b str {
+    // Trim growth slack. The vec is the arena's most recent allocation
+    // (emitting allocates nothing else), so bumpalo reclaims in place;
+    // measured cost is noise-level because it only copies when more than
+    // half the capacity would be reclaimed.
+    out.shrink_to_fit();
+    unsafe { core::str::from_utf8_unchecked(out.into_bump_slice()) }
+}
+
 /// Staging capacity for `FormatterSink`. Without it, every structural byte
 /// (`[ ] { } , : "`) would be its own virtual `fmt::Write::write_str` call;
 /// with it, output reaches the formatter in ~128-byte runs.
@@ -441,6 +483,33 @@ impl DataValue<'_> {
     pub fn write_json_pretty_into(&self, out: &mut Vec<u8>) {
         let _ = write_data_value_pretty(out, self, 0);
     }
+
+    /// Emit the compact JSON encoding directly into `arena` and return the
+    /// arena-resident string — no heap allocation. The single-copy path for
+    /// consumers that render values to text living alongside the values
+    /// (e.g. a `&str` result slot in the same evaluation arena).
+    ///
+    /// ```
+    /// use bumpalo::Bump;
+    /// use datavalue_rs::DataValue;
+    ///
+    /// let arena = Bump::new();
+    /// let v = DataValue::from_str(r#"{"a":[1,2.5,"hi"]}"#, &arena).unwrap();
+    /// let s: &str = v.to_json_str_in(&arena);
+    /// assert_eq!(s, r#"{"a":[1,2.5,"hi"]}"#);
+    /// ```
+    pub fn to_json_str_in<'b>(&self, arena: &'b bumpalo::Bump) -> &'b str {
+        let mut out = bumpalo::collections::Vec::new_in(arena);
+        let _ = write_data_value(&mut out, self);
+        into_arena_str(out)
+    }
+
+    /// Pretty sibling of [`DataValue::to_json_str_in`].
+    pub fn to_json_pretty_str_in<'b>(&self, arena: &'b bumpalo::Bump) -> &'b str {
+        let mut out = bumpalo::collections::Vec::new_in(arena);
+        let _ = write_data_value_pretty(&mut out, self, 0);
+        into_arena_str(out)
+    }
 }
 
 impl OwnedDataValue {
@@ -465,6 +534,21 @@ impl OwnedDataValue {
     /// Append the pretty JSON encoding of this value to `out`.
     pub fn write_json_pretty_into(&self, out: &mut Vec<u8>) {
         let _ = write_owned_value_pretty(out, self, 0);
+    }
+
+    /// Emit the compact JSON encoding directly into `arena`; see
+    /// [`DataValue::to_json_str_in`]. This is the owned-side mirror.
+    pub fn to_json_str_in<'b>(&self, arena: &'b bumpalo::Bump) -> &'b str {
+        let mut out = bumpalo::collections::Vec::new_in(arena);
+        let _ = write_owned_value(&mut out, self);
+        into_arena_str(out)
+    }
+
+    /// Pretty sibling of [`OwnedDataValue::to_json_str_in`].
+    pub fn to_json_pretty_str_in<'b>(&self, arena: &'b bumpalo::Bump) -> &'b str {
+        let mut out = bumpalo::collections::Vec::new_in(arena);
+        let _ = write_owned_value_pretty(&mut out, self, 0);
+        into_arena_str(out)
     }
 }
 
@@ -600,6 +684,34 @@ mod tests {
             pretty_buf,
             "pretty mismatch"
         );
+    }
+
+    #[test]
+    fn to_json_str_in_matches_to_string() {
+        let inputs = [
+            "null",
+            "[]",
+            r#"{"a":[1,2.5,"hi\n",null,true],"b":{"c":"é€"},"e":-0.125}"#,
+        ];
+        let arena = Bump::new();
+        // Emit into a *different* arena than the values live in.
+        let out_arena = Bump::new();
+        for input in inputs {
+            let v = DataValue::from_str(input, &arena).unwrap();
+            assert_eq!(v.to_json_str_in(&out_arena), v.to_string());
+            assert_eq!(v.to_json_pretty_str_in(&out_arena), v.pretty().to_string());
+
+            let owned = v.to_owned();
+            assert_eq!(owned.to_json_str_in(&out_arena), owned.to_string());
+            assert_eq!(
+                owned.to_json_pretty_str_in(&out_arena),
+                owned.pretty().to_string()
+            );
+        }
+        // Long string: forces BumpVec growth inside the emit.
+        let long = format!("\"{}\"", "x".repeat(5000));
+        let v = DataValue::from_str(&long, &arena).unwrap();
+        assert_eq!(v.to_json_str_in(&out_arena), long);
     }
 
     #[test]

@@ -182,6 +182,14 @@ impl DataDateTime {
         format_utc_iso_secs(&self.dt)
     }
 
+    /// Heap-free ISO rendering for the common case; see
+    /// [`utc_iso_secs_buf`]. The emitter and `Display` write these bytes
+    /// straight to their sink.
+    #[inline]
+    pub(crate) fn iso_secs_buf(&self) -> Option<[u8; 20]> {
+        utc_iso_secs_buf(&self.dt)
+    }
+
     pub fn add_duration(&self, duration: &DataDuration) -> DataDateTime {
         let dt = Self::saturate(
             self.dt.checked_add_signed(duration.0),
@@ -223,13 +231,30 @@ impl DataDateTime {
 
 impl fmt::Display for DataDateTime {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.to_iso_string())
+        match self.iso_secs_buf() {
+            // SAFETY: the buffer is all ASCII.
+            Some(buf) => f.write_str(unsafe { core::str::from_utf8_unchecked(&buf) }),
+            None => f.write_str(&self.to_iso_string()),
+        }
     }
 }
 
 // ---- DataDuration ----
 
 impl DataDuration {
+    /// Days/hours/minutes/seconds decomposition backing the `Xd:Xh:Xm:Xs`
+    /// wire format (shared by `Display` and the JSON emitter).
+    #[inline]
+    pub(crate) fn dhms(&self) -> (i64, i64, i64, i64) {
+        let total = self.0.num_seconds();
+        (
+            total / 86_400,
+            (total % 86_400) / 3_600,
+            (total % 3_600) / 60,
+            total % 60,
+        )
+    }
+
     fn saturate(seconds: f64) -> DataDuration {
         if !seconds.is_finite() || seconds > i64::MAX as f64 / 1000.0 {
             DataDuration(Duration::MAX)
@@ -356,11 +381,7 @@ impl DataDuration {
 
 impl fmt::Display for DataDuration {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let total = self.0.num_seconds();
-        let days = total / 86_400;
-        let hours = (total % 86_400) / 3_600;
-        let minutes = (total % 3_600) / 60;
-        let seconds = total % 60;
+        let (days, hours, minutes, seconds) = self.dhms();
         write!(f, "{}d:{}h:{}m:{}s", days, hours, minutes, seconds)
     }
 }
@@ -369,10 +390,22 @@ impl fmt::Display for DataDuration {
 
 #[inline]
 fn format_utc_iso_secs(dt: &DateTime<Utc>) -> String {
+    match utc_iso_secs_buf(dt) {
+        // SAFETY: every byte written is ASCII.
+        Some(buf) => unsafe { String::from_utf8_unchecked(buf.to_vec()) },
+        None => dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+    }
+}
+
+/// Stack rendering of `YYYY-MM-DDTHH:MM:SSZ` — exactly 20 ASCII bytes, no
+/// heap. `None` for years outside 0..=9999 (callers fall back to chrono's
+/// RFC3339 formatter).
+#[inline]
+pub(crate) fn utc_iso_secs_buf(dt: &DateTime<Utc>) -> Option<[u8; 20]> {
     use chrono::{Datelike, Timelike};
     let year = dt.year();
     if !(0..=9999).contains(&year) {
-        return dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        return None;
     }
     let month = dt.month() as u8;
     let day = dt.day() as u8;
@@ -402,9 +435,7 @@ fn format_utc_iso_secs(dt: &DateTime<Utc>) -> String {
     buf[17] = b'0' + second / 10;
     buf[18] = b'0' + second % 10;
     buf[19] = b'Z';
-
-    // SAFETY: every byte written is ASCII.
-    unsafe { String::from_utf8_unchecked(buf.to_vec()) }
+    Some(buf)
 }
 
 #[inline(always)]

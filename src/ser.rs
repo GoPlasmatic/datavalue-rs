@@ -51,7 +51,7 @@ impl Serialize for DataValue<'_> {
             // JSON has no datetime/duration types — render as strings using
             // the same wire format the parser side accepts.
             #[cfg(feature = "datetime")]
-            DataValue::DateTime(d) => serializer.serialize_str(&d.to_iso_string()),
+            DataValue::DateTime(d) => serializer.collect_str(&d),
             #[cfg(feature = "datetime")]
             DataValue::Duration(d) => serializer.collect_str(&d),
         }
@@ -225,7 +225,7 @@ impl Serialize for OwnedDataValue {
                 map.end()
             }
             #[cfg(feature = "datetime")]
-            OwnedDataValue::DateTime(d) => serializer.serialize_str(&d.to_iso_string()),
+            OwnedDataValue::DateTime(d) => serializer.collect_str(d),
             #[cfg(feature = "datetime")]
             OwnedDataValue::Duration(d) => serializer.collect_str(d),
         }

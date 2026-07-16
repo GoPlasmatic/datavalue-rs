@@ -174,6 +174,45 @@ fn write_escaped_str<S: JsonSink>(out: &mut S, s: &str) -> Result<(), S::Error> 
     out.write_byte(b'"')
 }
 
+/// DateTime arm: the 20-byte ISO buffer is pure ASCII with no JSON-special
+/// bytes, so it goes to the sink as quote + raw bytes + quote — no heap
+/// `String`, no escape scan. Years outside 0..=9999 fall back to chrono's
+/// RFC3339 formatter (heap) through the escaped path.
+#[cfg(feature = "datetime")]
+fn write_datetime<S: JsonSink>(
+    out: &mut S,
+    d: &crate::datetime::DataDateTime,
+) -> Result<(), S::Error> {
+    match d.iso_secs_buf() {
+        Some(buf) => {
+            out.write_byte(b'"')?;
+            out.write_bytes(&buf)?;
+            out.write_byte(b'"')
+        }
+        None => write_escaped_str(out, &d.to_iso_string()),
+    }
+}
+
+/// Duration arm: `Xd:Xh:Xm:Xs` is digits, `-`, letters, and `:` — never
+/// escaped, so it streams via itoa without the intermediate `String`.
+#[cfg(feature = "datetime")]
+fn write_duration<S: JsonSink>(
+    out: &mut S,
+    d: &crate::datetime::DataDuration,
+) -> Result<(), S::Error> {
+    let (days, hours, minutes, seconds) = d.dhms();
+    let mut b = itoa::Buffer::new();
+    out.write_byte(b'"')?;
+    out.write_bytes(b.format(days).as_bytes())?;
+    out.write_bytes(b"d:")?;
+    out.write_bytes(b.format(hours).as_bytes())?;
+    out.write_bytes(b"h:")?;
+    out.write_bytes(b.format(minutes).as_bytes())?;
+    out.write_bytes(b"m:")?;
+    out.write_bytes(b.format(seconds).as_bytes())?;
+    out.write_bytes(b"s\"")
+}
+
 #[inline]
 fn write_escape_byte<S: JsonSink>(out: &mut S, b: u8) -> Result<(), S::Error> {
     match b {
@@ -250,9 +289,9 @@ fn write_data_value<S: JsonSink>(out: &mut S, v: &DataValue<'_>) -> Result<(), S
             out.write_byte(b'}')
         }
         #[cfg(feature = "datetime")]
-        DataValue::DateTime(d) => write_escaped_str(out, &d.to_iso_string()),
+        DataValue::DateTime(d) => write_datetime(out, &d),
         #[cfg(feature = "datetime")]
-        DataValue::Duration(d) => write_escaped_str(out, &d.to_string()),
+        DataValue::Duration(d) => write_duration(out, &d),
     }
 }
 
@@ -290,9 +329,9 @@ fn write_owned_value<S: JsonSink>(out: &mut S, v: &OwnedDataValue) -> Result<(),
             out.write_byte(b'}')
         }
         #[cfg(feature = "datetime")]
-        OwnedDataValue::DateTime(d) => write_escaped_str(out, &d.to_iso_string()),
+        OwnedDataValue::DateTime(d) => write_datetime(out, d),
         #[cfg(feature = "datetime")]
-        OwnedDataValue::Duration(d) => write_escaped_str(out, &d.to_string()),
+        OwnedDataValue::Duration(d) => write_duration(out, d),
     }
 }
 
@@ -360,9 +399,9 @@ fn write_data_value_pretty<S: JsonSink>(
             out.write_byte(b'}')
         }
         #[cfg(feature = "datetime")]
-        DataValue::DateTime(d) => write_escaped_str(out, &d.to_iso_string()),
+        DataValue::DateTime(d) => write_datetime(out, &d),
         #[cfg(feature = "datetime")]
-        DataValue::Duration(d) => write_escaped_str(out, &d.to_string()),
+        DataValue::Duration(d) => write_duration(out, &d),
     }
 }
 
@@ -414,9 +453,9 @@ fn write_owned_value_pretty<S: JsonSink>(
             out.write_byte(b'}')
         }
         #[cfg(feature = "datetime")]
-        OwnedDataValue::DateTime(d) => write_escaped_str(out, &d.to_iso_string()),
+        OwnedDataValue::DateTime(d) => write_datetime(out, d),
         #[cfg(feature = "datetime")]
-        OwnedDataValue::Duration(d) => write_escaped_str(out, &d.to_string()),
+        OwnedDataValue::Duration(d) => write_duration(out, d),
     }
 }
 
@@ -651,6 +690,31 @@ mod tests {
             pretty_buf,
             "pretty mismatch"
         );
+    }
+
+    #[cfg(feature = "datetime")]
+    #[test]
+    fn datetime_emit_matches_display_wire_format() {
+        use crate::datetime::DataDateTime;
+
+        let dt = DataDateTime::parse("2024-01-15T12:30:45Z").unwrap();
+        let later = DataDateTime::parse("2024-01-18T16:35:51Z").unwrap();
+        let du = later.diff(&dt);
+
+        for v in [DataValue::DateTime(dt), DataValue::Duration(du)] {
+            let display = v.to_string();
+            let mut buf = Vec::new();
+            v.write_json_into(&mut buf);
+            assert_eq!(display.into_bytes(), buf);
+
+            let owned = v.to_owned();
+            assert_eq!(owned.to_string(), v.to_string());
+        }
+        assert_eq!(
+            DataValue::DateTime(dt).to_string(),
+            "\"2024-01-15T12:30:45Z\""
+        );
+        assert_eq!(DataValue::Duration(du).to_string(), "\"3d:4h:5m:6s\"");
     }
 
     #[test]

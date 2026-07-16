@@ -37,6 +37,12 @@ fn escape_mask(w: u64) -> u64 {
 /// Sink abstraction over `Vec<u8>` and `fmt::Formatter`. Bytes pushed are
 /// always valid UTF-8 (numbers are ASCII; strings are passed through from
 /// `&str` sources; escapes are ASCII), so the str adapter is sound.
+///
+/// Contract: every `write_bytes` call passes a *complete* valid-UTF-8 chunk
+/// (string runs are sliced at escape hits, which are ASCII, so run boundaries
+/// are char boundaries; everything else written is ASCII). `FormatterSink`'s
+/// staging buffer relies on this — it never splits a chunk, so the buffer
+/// content is always a concatenation of whole chunks and stays valid UTF-8.
 pub(crate) trait JsonSink {
     type Error;
     fn write_bytes(&mut self, b: &[u8]) -> Result<(), Self::Error>;
@@ -57,23 +63,64 @@ impl JsonSink for Vec<u8> {
     }
 }
 
-struct FormatterSink<'a, 'b>(&'a mut fmt::Formatter<'b>);
+/// Staging capacity for `FormatterSink`. Without it, every structural byte
+/// (`[ ] { } , : "`) would be its own virtual `fmt::Write::write_str` call;
+/// with it, output reaches the formatter in ~128-byte runs.
+const FMT_STAGING: usize = 128;
+
+struct FormatterSink<'a, 'b> {
+    f: &'a mut fmt::Formatter<'b>,
+    buf: [u8; FMT_STAGING],
+    len: usize,
+}
+
+impl<'a, 'b> FormatterSink<'a, 'b> {
+    fn new(f: &'a mut fmt::Formatter<'b>) -> Self {
+        FormatterSink {
+            f,
+            buf: [0; FMT_STAGING],
+            len: 0,
+        }
+    }
+
+    fn flush(&mut self) -> fmt::Result {
+        if self.len > 0 {
+            // SAFETY: the buffer holds a concatenation of complete chunks,
+            // each valid UTF-8 (see the JsonSink contract); chunks are never
+            // split across flushes.
+            let s = unsafe { core::str::from_utf8_unchecked(&self.buf[..self.len]) };
+            self.f.write_str(s)?;
+            self.len = 0;
+        }
+        Ok(())
+    }
+}
 
 impl<'a, 'b> JsonSink for FormatterSink<'a, 'b> {
     type Error = fmt::Error;
     #[inline]
     fn write_bytes(&mut self, b: &[u8]) -> Result<(), Self::Error> {
-        // SAFETY: every caller writes either ASCII bytes (escapes, numbers,
-        // structural punctuation) or pre-validated `&str` payloads.
-        let s = unsafe { core::str::from_utf8_unchecked(b) };
-        self.0.write_str(s)
+        if self.len + b.len() > FMT_STAGING {
+            self.flush()?;
+            if b.len() >= FMT_STAGING {
+                // SAFETY: chunks are complete valid UTF-8 (JsonSink contract).
+                let s = unsafe { core::str::from_utf8_unchecked(b) };
+                return self.f.write_str(s);
+            }
+        }
+        self.buf[self.len..self.len + b.len()].copy_from_slice(b);
+        self.len += b.len();
+        Ok(())
     }
     #[inline]
     fn write_byte(&mut self, b: u8) -> Result<(), Self::Error> {
         debug_assert!(b.is_ascii());
-        let buf = [b];
-        let s = unsafe { core::str::from_utf8_unchecked(&buf) };
-        self.0.write_str(s)
+        if self.len == FMT_STAGING {
+            self.flush()?;
+        }
+        self.buf[self.len] = b;
+        self.len += 1;
+        Ok(())
     }
 }
 
@@ -439,7 +486,9 @@ impl fmt::Display for DataValue<'_> {
     /// assert_eq!(v.to_string(), r#"{"a":[1,2.5,"hi"]}"#);
     /// ```
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write_data_value(&mut FormatterSink(f), self)
+        let mut sink = FormatterSink::new(f);
+        write_data_value(&mut sink, self)?;
+        sink.flush()
     }
 }
 
@@ -453,19 +502,25 @@ impl fmt::Display for OwnedDataValue {
     /// assert_eq!(v.to_string(), r#"{"a":[1,2.5,"hi"]}"#);
     /// ```
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write_owned_value(&mut FormatterSink(f), self)
+        let mut sink = FormatterSink::new(f);
+        write_owned_value(&mut sink, self)?;
+        sink.flush()
     }
 }
 
 impl fmt::Display for Pretty<'_, DataValue<'_>> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write_data_value_pretty(&mut FormatterSink(f), self.0, 0)
+        let mut sink = FormatterSink::new(f);
+        write_data_value_pretty(&mut sink, self.0, 0)?;
+        sink.flush()
     }
 }
 
 impl fmt::Display for Pretty<'_, OwnedDataValue> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write_owned_value_pretty(&mut FormatterSink(f), self.0, 0)
+        let mut sink = FormatterSink::new(f);
+        write_owned_value_pretty(&mut sink, self.0, 0)?;
+        sink.flush()
     }
 }
 
@@ -524,6 +579,48 @@ mod tests {
         let s = format!("\"{}\"", "x".repeat(200));
         let v = DataValue::from_str(&s, &arena).unwrap();
         assert_eq!(v.to_string(), s);
+    }
+
+    // Display goes through FormatterSink's staging buffer; write_json_into
+    // goes straight to the Vec. The two must be byte-identical for every
+    // buffering edge case: chunks that straddle the FMT_STAGING boundary,
+    // chunks larger than the buffer (direct-write path), multi-byte UTF-8
+    // near flush points, and escape-heavy strings (many tiny chunks).
+    fn assert_display_matches_vec(input: &str) {
+        let arena = Bump::new();
+        let v = DataValue::from_str(input, &arena).unwrap();
+        let mut buf = Vec::new();
+        v.write_json_into(&mut buf);
+        assert_eq!(v.to_string().into_bytes(), buf, "compact mismatch");
+
+        let mut pretty_buf = Vec::new();
+        v.write_json_pretty_into(&mut pretty_buf);
+        assert_eq!(
+            v.pretty().to_string().into_bytes(),
+            pretty_buf,
+            "pretty mismatch"
+        );
+    }
+
+    #[test]
+    fn display_matches_vec_across_staging_boundaries() {
+        // ASCII strings sized to land runs on every offset around the
+        // 128-byte staging capacity.
+        for n in [1, 7, 126, 127, 128, 129, 200, 255, 256, 257, 1000] {
+            assert_display_matches_vec(&format!("\"{}\"", "x".repeat(n)));
+        }
+        // Multi-byte UTF-8 (2- and 3-byte chars) filling past the boundary —
+        // a split inside a char would corrupt output or trip UTF-8 checks.
+        for n in [60, 63, 64, 65, 100] {
+            assert_display_matches_vec(&format!("\"{}\"", "é".repeat(n)));
+            assert_display_matches_vec(&format!("\"{}\"", "€".repeat(n)));
+        }
+        // Escape-heavy: alternating escapes chop the string into 1-byte runs.
+        assert_display_matches_vec(&format!("\"{}\"", r#"a\n"#.repeat(100)));
+        // Composite document with many small structural writes.
+        assert_display_matches_vec(
+            r#"{"a":[1,2.5,"hi\n",null,true],"b":{"c":"é€","d":[[],{}]},"e":-0.125}"#,
+        );
     }
 
     #[test]

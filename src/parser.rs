@@ -598,6 +598,68 @@ mod tests {
     }
 
     #[test]
+    fn malformed_number_literals_reject() {
+        // JSON requires a digit after `.` and after `e`/`e+`/`e-`; these pin
+        // rejection of every truncated shape (whole-document errors — the
+        // specific error kind is not part of the contract).
+        let arena = Bump::new();
+        for input in [
+            "1.",
+            "-1.",
+            "1.e5",
+            "1e",
+            "1e+",
+            "1e-",
+            "1E",
+            "[1.]",
+            "[1e]",
+            "{\"a\":1.}",
+            "1.5e",
+            "0.",
+            "-0.e1",
+        ] {
+            assert!(
+                DataValue::from_str(input, &arena).is_err(),
+                "{input:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    // The 17-digit literals deliberately carry more precision than f64
+    // round-trips — they pin correct rounding of canada-fixture-shaped input.
+    #[allow(clippy::excessive_precision)]
+    fn float_parse_parity() {
+        // Shapes that exercise the float path end to end, pinned against
+        // the correctly-rounded values (std's parser agrees bit-exactly).
+        for (input, expect) in [
+            ("0.5", 0.5),
+            ("-0.5", -0.5),
+            ("3.5", 3.5),
+            ("1e3", 1000.0),
+            ("1E3", 1000.0),
+            ("1e+3", 1000.0),
+            ("2.5e-2", 0.025),
+            ("-65.613616999999977", -65.613616999999977),
+            ("112.58598277699663", 112.58598277699663),
+            ("0e0", 0.0),
+            ("0.0", 0.0),
+        ] {
+            assert_eq!(parse(input).as_f64(), Some(expect), "{input}");
+        }
+        // Huge exponents saturate to infinity (fast-float2 semantics; note
+        // serde_json instead rejects these literals as out of range).
+        assert_eq!(parse("1e999").as_f64(), Some(f64::INFINITY));
+        assert_eq!(parse("-1e999").as_f64(), Some(f64::NEG_INFINITY));
+        // Numbers followed by structural bytes stop at the right place.
+        let arena = Bump::new();
+        let v = DataValue::from_str("[1.5,2.5e1,-3]", &arena).unwrap();
+        assert_eq!(v[0].as_f64(), Some(1.5));
+        assert_eq!(v[1].as_f64(), Some(25.0));
+        assert_eq!(v[2].as_i64(), Some(-3));
+    }
+
+    #[test]
     fn i64_boundaries() {
         assert_eq!(parse("9223372036854775807").as_i64(), Some(i64::MAX));
         assert_eq!(parse("-9223372036854775808").as_i64(), Some(i64::MIN));

@@ -15,25 +15,40 @@ pub enum NumberValue {
     Float(f64),
 }
 
+/// f64 -> i64 when the value is whole and exactly representable.
+/// The upper bound is strict: `i64::MAX as f64` rounds up to 2^63, which
+/// overflows i64 (a `<=` bound would admit 2^63 and saturate it to
+/// `i64::MAX`, silently changing the value by 1). The largest admitted
+/// value is 2^63 - 1024. `i64::MIN as f64` is exactly -2^63, so `>=` is
+/// correct on the low side.
+#[inline]
+fn f64_as_i64_exact(value: f64) -> Option<i64> {
+    if value.fract() == 0.0
+        && !value.is_nan()
+        && !value.is_infinite()
+        && value >= i64::MIN as f64
+        && value < i64::MAX as f64
+    {
+        Some(value as i64)
+    } else {
+        None
+    }
+}
+
 impl NumberValue {
     #[inline]
     pub fn from_i64(value: i64) -> Self {
         NumberValue::Integer(value)
     }
 
-    /// Construct from an f64. Whole-valued floats within i64 range collapse
-    /// to `Integer` so subsequent arithmetic uses the integer fast path.
+    /// Construct from an f64. Whole-valued floats exactly representable in
+    /// i64 collapse to `Integer` so subsequent arithmetic uses the integer
+    /// fast path.
     #[inline]
     pub fn from_f64(value: f64) -> Self {
-        if value.fract() == 0.0
-            && !value.is_nan()
-            && !value.is_infinite()
-            && value >= i64::MIN as f64
-            && value <= i64::MAX as f64
-        {
-            NumberValue::Integer(value as i64)
-        } else {
-            NumberValue::Float(value)
+        match f64_as_i64_exact(value) {
+            Some(i) => NumberValue::Integer(i),
+            None => NumberValue::Float(value),
         }
     }
 
@@ -46,18 +61,7 @@ impl NumberValue {
     pub fn as_i64(&self) -> Option<i64> {
         match *self {
             NumberValue::Integer(i) => Some(i),
-            NumberValue::Float(f) => {
-                if f.fract() == 0.0
-                    && !f.is_nan()
-                    && !f.is_infinite()
-                    && f >= i64::MIN as f64
-                    && f <= i64::MAX as f64
-                {
-                    Some(f as i64)
-                } else {
-                    None
-                }
-            }
+            NumberValue::Float(f) => f64_as_i64_exact(f),
         }
     }
 
@@ -203,8 +207,13 @@ impl fmt::Display for NumberValue {
                 // Match serde_json::Number's f64 formatting: "1.5" not "1.5e0".
                 if fl.is_nan() || fl.is_infinite() {
                     write!(f, "null")
+                } else if let Some(i) = f64_as_i64_exact(fl) {
+                    write!(f, "{}.0", i)
                 } else if fl.fract() == 0.0 {
-                    write!(f, "{}.0", fl as i64)
+                    // Whole float outside i64's exact range: {:?} keeps the
+                    // float shape ("9.223372036854776e18"), matching
+                    // ryu/serde_json for these magnitudes.
+                    write!(f, "{:?}", fl)
                 } else {
                     write!(f, "{}", fl)
                 }
@@ -240,6 +249,54 @@ mod tests {
             NumberValue::from_f64(f64::INFINITY),
             NumberValue::Float(_)
         ));
+    }
+
+    // 2^63: what `i64::MAX as f64` actually rounds up to. Not representable
+    // as i64, so it must stay Float.
+    const TWO_POW_63: f64 = 9_223_372_036_854_775_808.0;
+    // Largest f64 below 2^63 (= 2^63 - 1024): the biggest float that
+    // converts to i64 exactly.
+    const BELOW_TWO_POW_63: f64 = 9_223_372_036_854_774_784.0;
+
+    #[test]
+    fn from_f64_boundary_at_two_pow_63() {
+        assert!(matches!(
+            NumberValue::from_f64(TWO_POW_63),
+            NumberValue::Float(f) if f == TWO_POW_63
+        ));
+        assert!(matches!(
+            NumberValue::from_f64(BELOW_TWO_POW_63),
+            NumberValue::Integer(9_223_372_036_854_774_784)
+        ));
+        // i64::MIN is exactly -2^63, representable, so it collapses.
+        assert!(matches!(
+            NumberValue::from_f64(i64::MIN as f64),
+            NumberValue::Integer(i64::MIN)
+        ));
+    }
+
+    #[test]
+    fn as_i64_float_boundary_at_two_pow_63() {
+        assert_eq!(NumberValue::Float(TWO_POW_63).as_i64(), None);
+        assert_eq!(
+            NumberValue::Float(BELOW_TWO_POW_63).as_i64(),
+            Some(9_223_372_036_854_774_784)
+        );
+        assert_eq!(NumberValue::Float(i64::MIN as f64).as_i64(), Some(i64::MIN));
+    }
+
+    #[test]
+    fn display_whole_float_beyond_i64_range() {
+        // Previously the unguarded `as i64` cast saturated, printing the
+        // off-by-one "9223372036854775807.0".
+        assert_eq!(
+            NumberValue::Float(TWO_POW_63).to_string(),
+            "9.223372036854776e18"
+        );
+        assert_eq!(
+            NumberValue::Float(BELOW_TWO_POW_63).to_string(),
+            "9223372036854774784.0"
+        );
     }
 
     #[test]

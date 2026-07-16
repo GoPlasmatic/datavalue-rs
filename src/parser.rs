@@ -206,7 +206,10 @@ impl<'a> Parser<'a> {
                 acc = -((c - b'0') as i64);
                 self.pos += 1;
                 // 18 digits fit in i64 unconditionally (i64::MAX ≈ 9.22 × 10^18).
-                // Beyond that we tag overflow and let the f64 fallback handle it.
+                // The 19th digit and beyond can overflow, so those use checked
+                // arithmetic; on overflow we tag it and let the f64 fallback
+                // handle the literal. 19-digit values inside i64 range (up to
+                // i64::MAX itself) must stay on the integer path.
                 let mut digits: u32 = 1;
                 while let Some(&d) = self.bytes.get(self.pos) {
                     match d {
@@ -214,8 +217,14 @@ impl<'a> Parser<'a> {
                             if digits < 18 {
                                 acc = acc * 10 - (d - b'0') as i64;
                                 digits += 1;
-                            } else {
-                                int_overflowed = true;
+                            } else if !int_overflowed {
+                                match acc
+                                    .checked_mul(10)
+                                    .and_then(|v| v.checked_sub((d - b'0') as i64))
+                                {
+                                    Some(v) => acc = v,
+                                    None => int_overflowed = true,
+                                }
                             }
                             self.pos += 1;
                         }
@@ -583,6 +592,12 @@ mod tests {
     fn i64_boundaries() {
         assert_eq!(parse("9223372036854775807").as_i64(), Some(i64::MAX));
         assert_eq!(parse("-9223372036854775808").as_i64(), Some(i64::MIN));
+        // 19-digit values inside i64 range stay integers (the old 18-digit
+        // accumulator cap demoted these to f64, silently losing precision).
+        assert_eq!(
+            parse("1234567890123456789").as_i64(),
+            Some(1_234_567_890_123_456_789)
+        );
         // Just past i64::MAX must demote to f64, not silently wrap.
         assert!(parse("9223372036854775808").is_f64());
         // Just past i64::MIN must demote to f64.

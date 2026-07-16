@@ -473,11 +473,13 @@ impl<'a> Parser<'a> {
         // the arena and disperse the tree, destroying serialize-traversal
         // cache locality. The doubling cost on long arrays (twitter's
         // 100-status array) is dwarfed by the locality cost of high cap.
-        let mut items: BumpVec<DataValue<'a>> = BumpVec::with_capacity_in(8, self.arena);
+        // Empty composites allocate nothing — `&[]` promotes to any arena
+        // lifetime (covariance over 'static).
         if let Some(&b']') = self.bytes.get(self.pos) {
             self.pos += 1;
-            return Ok(DataValue::Array(items.into_bump_slice()));
+            return Ok(DataValue::Array(&[]));
         }
+        let mut items: BumpVec<DataValue<'a>> = BumpVec::with_capacity_in(8, self.arena);
         loop {
             let v = self.parse_value(depth + 1)?;
             items.push(v);
@@ -517,12 +519,12 @@ impl<'a> Parser<'a> {
         // tree across the arena and tanks serialize traversal cache
         // locality (canada serialize doubles when arrays go to cap 64);
         // too low forces a realloc + memmove on every grow.
-        let mut pairs: BumpVec<(&'a str, DataValue<'a>)> =
-            BumpVec::with_capacity_in(32, self.arena);
         if let Some(&b'}') = self.bytes.get(self.pos) {
             self.pos += 1;
-            return Ok(DataValue::Object(pairs.into_bump_slice()));
+            return Ok(DataValue::Object(&[]));
         }
+        let mut pairs: BumpVec<(&'a str, DataValue<'a>)> =
+            BumpVec::with_capacity_in(32, self.arena);
         loop {
             // Key. After the loop entry / a `,` we already skipped WS.
             if self.peek()? != b'"' {

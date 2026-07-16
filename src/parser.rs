@@ -58,26 +58,35 @@ impl std::error::Error for ParseError {}
 /// past anything legitimate JSON would produce.
 const MAX_DEPTH: u16 = 256;
 
-const SWAR_ONES: u64 = 0x0101_0101_0101_0101;
-const SWAR_HIGHS: u64 = 0x8080_8080_8080_8080;
-
 /// SWAR scan for the next byte that ends a JSON string fast path: `"`, `\\`,
 /// or any control byte (< 0x20). Returns a mask with the high bit set in the
 /// byte positions that match; the first match (if any) is found via
-/// `trailing_zeros() / 8`. Bytes are interpreted little-endian.
-#[inline(always)]
-fn string_terminator_mask(w: u64) -> u64 {
-    // For "byte equals X", XOR makes the matching byte zero, then
-    // `(z - 0x01..) & !z & 0x80..` highlights any zero-byte position.
-    let q = w ^ (b'"' as u64 * SWAR_ONES);
-    let bs = w ^ (b'\\' as u64 * SWAR_ONES);
-    // For "byte < 0x20", mask off the low 5 bits per byte (`& 0xE0`) and
-    // detect zero bytes — any byte 0x00..=0x1F has its top 3 bits clear.
-    let lo = w & 0xE0E0_E0E0_E0E0_E0E0;
-    let m_q = q.wrapping_sub(SWAR_ONES) & !q;
-    let m_bs = bs.wrapping_sub(SWAR_ONES) & !bs;
-    let m_lo = lo.wrapping_sub(SWAR_ONES) & !lo;
-    (m_q | m_bs | m_lo) & SWAR_HIGHS
+/// `trailing_zeros() / 8`. Bytes are interpreted little-endian. Shared with
+/// the emitter via `crate::simd` (single source of truth for the mask).
+use crate::simd::special_mask8 as string_terminator_mask;
+
+/// How many clean 8-byte SWAR windows a string scan rides before handing the
+/// remainder to `simd::find_string_terminator`'s 16-byte path. Two windows
+/// (16 bytes) cover the typical short JSON string (object keys, IDs) without
+/// ever paying SIMD register setup; anything still unterminated is long
+/// enough for the wider stride to win.
+const SWAR_WINDOWS_BEFORE_WIDE: u32 = 2;
+
+/// `extend_from_slice` replacement for `BumpVec<u8>`: reserve + memcpy.
+/// bumpalo's Vec is a pre-specialization std fork whose `extend_from_slice`
+/// copies element-wise through a cloned iterator — measured ~6x slower on
+/// long safe runs in the string-escape path.
+#[inline]
+fn bump_extend(out: &mut BumpVec<u8>, b: &[u8]) {
+    out.reserve(b.len());
+    let len = out.len();
+    // SAFETY: `reserve` guarantees capacity for `len + b.len()`; the source
+    // is the parser's input slice, which never overlaps the arena-owned
+    // destination buffer.
+    unsafe {
+        core::ptr::copy_nonoverlapping(b.as_ptr(), out.as_mut_ptr().add(len), b.len());
+        out.set_len(len + b.len());
+    }
 }
 
 impl<'a> DataValue<'a> {
@@ -304,73 +313,73 @@ impl<'a> Parser<'a> {
         self.pos += 1;
         let start = self.pos;
 
-        // Bulk SWAR scan: 8 bytes at a time, looking for `"`, `\\`, or any
-        // byte < 0x20. The branch-free mask gives us the offset of the first
-        // hit within the window via trailing_zeros / 8. Inlined here rather
-        // than dispatched via a SIMD helper — the call/slice boundary cost
-        // outweighs even NEON's 16-byte stride for the typical mix of short
-        // JSON strings (object keys, IDs).
+        self.scan_to_special();
+        match self.bytes.get(self.pos) {
+            Some(&b'"') => {
+                let s = &self.input[start..self.pos];
+                self.pos += 1;
+                Ok(s)
+            }
+            Some(&b'\\') => {
+                // Switch to slow path: copy what we have so far, then
+                // resolve escapes one at a time.
+                self.parse_string_with_escapes(start)
+            }
+            // scan_to_special only stops on `"`, `\\`, or a control byte.
+            Some(&b) => Err(self.err(ParseErrorKind::UnexpectedByte(b))),
+            None => Err(self.err(ParseErrorKind::UnexpectedEof)),
+        }
+    }
+
+    /// Advance `pos` to the next `"`, `\\`, or control byte — or EOF.
+    ///
+    /// Adaptive stride: the first couple of 8-byte SWAR windows are inlined
+    /// (the call/slice boundary cost of the SIMD helper outweighs even
+    /// NEON's 16-byte stride for the typical mix of short JSON strings —
+    /// object keys, IDs); a string still unterminated after
+    /// `SWAR_WINDOWS_BEFORE_WIDE` windows is long, so the remainder goes to
+    /// the 16-byte SIMD path where its register setup amortizes.
+    #[inline(always)]
+    fn scan_to_special(&mut self) {
+        let mut clean_windows = 0u32;
         while self.pos + 8 <= self.bytes.len() {
             let w = u64::from_le_bytes(self.bytes[self.pos..self.pos + 8].try_into().unwrap());
             let mask = string_terminator_mask(w);
             if mask != 0 {
                 self.pos += (mask.trailing_zeros() / 8) as usize;
-                break;
+                return;
             }
             self.pos += 8;
-        }
-
-        // Tail (and post-SWAR-hit) per-byte handling.
-        loop {
-            let b = match self.bytes.get(self.pos) {
-                Some(&b) => b,
-                None => return Err(self.err(ParseErrorKind::UnexpectedEof)),
-            };
-            match b {
-                b'"' => {
-                    let s = &self.input[start..self.pos];
-                    self.pos += 1;
-                    return Ok(s);
+            clean_windows += 1;
+            if clean_windows >= SWAR_WINDOWS_BEFORE_WIDE {
+                match crate::simd::find_string_terminator(&self.bytes[self.pos..]) {
+                    Some(off) => self.pos += off,
+                    None => self.pos = self.bytes.len(),
                 }
-                b'\\' => {
-                    // Switch to slow path: copy what we have so far, then
-                    // resolve escapes one at a time.
-                    return self.parse_string_with_escapes(start);
-                }
-                0..=0x1F => {
-                    return Err(self.err(ParseErrorKind::UnexpectedByte(b)));
-                }
-                _ => self.pos += 1,
+                return;
             }
+        }
+        // Per-byte tail for the final < 8 bytes of input.
+        while let Some(&b) = self.bytes.get(self.pos) {
+            if matches!(b, b'"' | b'\\') || b < 0x20 {
+                return;
+            }
+            self.pos += 1;
         }
     }
 
     fn parse_string_with_escapes(&mut self, start: usize) -> Result<&'a str, ParseError> {
         let mut out: BumpVec<u8> = BumpVec::with_capacity_in(self.pos - start + 16, self.arena);
-        out.extend_from_slice(&self.bytes[start..self.pos]);
+        bump_extend(&mut out, &self.bytes[start..self.pos]);
 
         loop {
-            // Bulk-copy the safe run between escapes. Same SWAR scan as the
-            // fast path, but here we copy each window into `out` in one
-            // extend_from_slice rather than pushing per byte.
+            // Bulk-copy the safe run between escapes: scan to the next
+            // special byte (adaptive SWAR/SIMD), then copy the whole run in
+            // one memcpy rather than pushing per byte.
             let chunk_start = self.pos;
-            while self.pos + 8 <= self.bytes.len() {
-                let w = u64::from_le_bytes(self.bytes[self.pos..self.pos + 8].try_into().unwrap());
-                let mask = string_terminator_mask(w);
-                if mask != 0 {
-                    self.pos += (mask.trailing_zeros() / 8) as usize;
-                    break;
-                }
-                self.pos += 8;
-            }
-            while let Some(&b) = self.bytes.get(self.pos) {
-                if matches!(b, b'"' | b'\\') || b < 0x20 {
-                    break;
-                }
-                self.pos += 1;
-            }
+            self.scan_to_special();
             if self.pos > chunk_start {
-                out.extend_from_slice(&self.bytes[chunk_start..self.pos]);
+                bump_extend(&mut out, &self.bytes[chunk_start..self.pos]);
             }
 
             let b = match self.bytes.get(self.pos) {

@@ -18,22 +18,6 @@ use crate::number::NumberValue;
 use crate::owned::OwnedDataValue;
 use crate::value::DataValue;
 
-const SWAR_ONES: u64 = 0x0101_0101_0101_0101;
-const SWAR_HIGHS: u64 = 0x8080_8080_8080_8080;
-
-/// SWAR scan for the next byte that needs escaping inside a JSON string:
-/// `"`, `\\`, or any control byte (< 0x20). Mirrors the parser's scan.
-#[inline(always)]
-fn escape_mask(w: u64) -> u64 {
-    let q = w ^ (b'"' as u64 * SWAR_ONES);
-    let bs = w ^ (b'\\' as u64 * SWAR_ONES);
-    let lo = w & 0xE0E0_E0E0_E0E0_E0E0;
-    let m_q = q.wrapping_sub(SWAR_ONES) & !q;
-    let m_bs = bs.wrapping_sub(SWAR_ONES) & !bs;
-    let m_lo = lo.wrapping_sub(SWAR_ONES) & !lo;
-    (m_q | m_bs | m_lo) & SWAR_HIGHS
-}
-
 /// Sink abstraction over `Vec<u8>` and `fmt::Formatter`. Bytes pushed are
 /// always valid UTF-8 (numbers are ASCII; strings are passed through from
 /// `&str` sources; escapes are ASCII), so the str adapter is sound.
@@ -170,36 +154,19 @@ impl<'a, 'b> JsonSink for FormatterSink<'a, 'b> {
 fn write_escaped_str<S: JsonSink>(out: &mut S, s: &str) -> Result<(), S::Error> {
     out.write_byte(b'"')?;
     let bytes = s.as_bytes();
-    let mut i = 0;
     let mut run_start = 0;
 
-    while i + 8 <= bytes.len() {
-        let w = u64::from_le_bytes(bytes[i..i + 8].try_into().unwrap());
-        let mask = escape_mask(w);
-        if mask == 0 {
-            i += 8;
-            continue;
-        }
-        let off = (mask.trailing_zeros() / 8) as usize;
-        let hit = i + off;
+    // Scan-and-copy runs between escapes. The scan is the shared
+    // `crate::simd` helper: SWAR for slices under 32 bytes (the typical
+    // short JSON string — its criteria and mask are identical to the old
+    // inlined loop), the 16-byte SIMD stride for longer ones.
+    while let Some(off) = crate::simd::find_string_terminator(&bytes[run_start..]) {
+        let hit = run_start + off;
         if hit > run_start {
             out.write_bytes(&bytes[run_start..hit])?;
         }
         write_escape_byte(out, bytes[hit])?;
-        i = hit + 1;
-        run_start = i;
-    }
-    // Tail: per-byte for the final < 8 bytes.
-    while i < bytes.len() {
-        let b = bytes[i];
-        if matches!(b, b'"' | b'\\') || b < 0x20 {
-            if i > run_start {
-                out.write_bytes(&bytes[run_start..i])?;
-            }
-            write_escape_byte(out, b)?;
-            run_start = i + 1;
-        }
-        i += 1;
+        run_start = hit + 1;
     }
     if run_start < bytes.len() {
         out.write_bytes(&bytes[run_start..])?;

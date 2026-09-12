@@ -17,7 +17,11 @@ use bumpalo::Bump;
 use crate::datetime::{DataDateTime, DataDuration};
 use crate::number::NumberValue;
 use crate::parser::ParseError;
+#[cfg(feature = "tensor")]
+use crate::tensor::OwnedDataTensor;
 use crate::value::DataValue;
+#[cfg(feature = "tensor")]
+use std::sync::Arc;
 
 /// Heap-owned JSON value tree. Variants mirror [`DataValue`] one-for-one;
 /// no lifetime parameter.
@@ -34,9 +38,19 @@ pub enum OwnedDataValue {
     DateTime(DataDateTime),
     #[cfg(feature = "datetime")]
     Duration(DataDuration),
+    /// Opaque n-dimensional typed buffer. The one shared-ownership payload:
+    /// the buffer is immutable and potentially large, so clones of the tree
+    /// share it instead of deep-copying. Keeps the enum at 32 bytes.
+    #[cfg(feature = "tensor")]
+    Tensor(Arc<OwnedDataTensor>),
 }
 
 static OWNED_NULL: OwnedDataValue = OwnedDataValue::Null;
+
+// Feature-gated variants must not grow the enum past the 24-byte Vec/String
+// payload plus tag. Checked on 64-bit targets.
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(core::mem::size_of::<OwnedDataValue>() == 32);
 
 impl core::str::FromStr for OwnedDataValue {
     type Err = ParseError;
@@ -103,6 +117,11 @@ impl OwnedDataValue {
     #[inline]
     pub fn is_duration(&self) -> bool {
         matches!(self, OwnedDataValue::Duration(_))
+    }
+    #[cfg(feature = "tensor")]
+    #[inline]
+    pub fn is_tensor(&self) -> bool {
+        matches!(self, OwnedDataValue::Tensor(_))
     }
 
     // ---- Accessors ----
@@ -171,6 +190,22 @@ impl OwnedDataValue {
             OwnedDataValue::Duration(d) => Some(d),
             _ => None,
         }
+    }
+    #[cfg(feature = "tensor")]
+    #[inline]
+    pub fn as_tensor(&self) -> Option<&OwnedDataTensor> {
+        match self {
+            OwnedDataValue::Tensor(t) => Some(t),
+            _ => None,
+        }
+    }
+
+    /// Wrap a tensor in an `Arc` and hold it. To share an existing `Arc`,
+    /// use `OwnedDataValue::from(arc)`.
+    #[cfg(feature = "tensor")]
+    #[inline]
+    pub fn tensor(t: OwnedDataTensor) -> Self {
+        OwnedDataValue::Tensor(Arc::new(t))
     }
 
     /// `serde_json::Value::get`-style lookup.
@@ -252,6 +287,8 @@ impl OwnedDataValue {
             OwnedDataValue::DateTime(d) => DataValue::DateTime(*d),
             #[cfg(feature = "datetime")]
             OwnedDataValue::Duration(d) => DataValue::Duration(*d),
+            #[cfg(feature = "tensor")]
+            OwnedDataValue::Tensor(t) => DataValue::tensor_in(t.to_arena(arena), arena),
         }
     }
 }
@@ -278,6 +315,8 @@ impl<'a> DataValue<'a> {
             DataValue::DateTime(d) => OwnedDataValue::DateTime(d),
             #[cfg(feature = "datetime")]
             DataValue::Duration(d) => OwnedDataValue::Duration(d),
+            #[cfg(feature = "tensor")]
+            DataValue::Tensor(t) => OwnedDataValue::tensor(t.to_owned()),
         }
     }
 }
@@ -325,6 +364,8 @@ impl PartialEq for OwnedDataValue {
             (OwnedDataValue::DateTime(a), OwnedDataValue::DateTime(b)) => a == b,
             #[cfg(feature = "datetime")]
             (OwnedDataValue::Duration(a), OwnedDataValue::Duration(b)) => a == b,
+            #[cfg(feature = "tensor")]
+            (OwnedDataValue::Tensor(a), OwnedDataValue::Tensor(b)) => a == b,
             _ => false,
         }
     }
@@ -465,6 +506,23 @@ impl From<Vec<(String, OwnedDataValue)>> for OwnedDataValue {
     }
 }
 
+#[cfg(feature = "tensor")]
+impl From<OwnedDataTensor> for OwnedDataValue {
+    #[inline]
+    fn from(t: OwnedDataTensor) -> Self {
+        OwnedDataValue::tensor(t)
+    }
+}
+
+#[cfg(feature = "tensor")]
+impl From<Arc<OwnedDataTensor>> for OwnedDataValue {
+    /// Share an existing tensor: no copy, one refcount increment.
+    #[inline]
+    fn from(t: Arc<OwnedDataTensor>) -> Self {
+        OwnedDataValue::Tensor(t)
+    }
+}
+
 impl From<bool> for OwnedDataValue {
     #[inline]
     fn from(b: bool) -> Self {
@@ -487,13 +545,7 @@ impl From<u64> for OwnedDataValue {
     /// fall back to `f64` (matches the parser / serde visitor behaviour).
     #[inline]
     fn from(v: u64) -> Self {
-        if v <= i64::MAX as u64 {
-            OwnedDataValue::from_i64(v as i64)
-        } else {
-            // Bypass `from_f64` (which would collapse this whole value back
-            // to Integer with i64 saturation) and construct Float directly.
-            OwnedDataValue::Number(NumberValue::Float(v as f64))
-        }
+        OwnedDataValue::Number(NumberValue::from_u64(v))
     }
 }
 impl From<usize> for OwnedDataValue {
@@ -678,5 +730,43 @@ mod tests {
         );
         let back = owned.to_arena(&arena);
         assert_eq!(back, bv);
+    }
+
+    #[cfg(feature = "tensor")]
+    #[test]
+    fn tensor_variant_round_trips_and_shares_on_clone() {
+        use crate::tensor::{DataTensor, OwnedDataTensor};
+        let arena = Bump::new();
+        let t = DataTensor::from_slice_in(&[3], &[1i64, 2, 3], &arena).unwrap();
+        let bv = DataValue::tensor_in(t, &arena);
+        let owned = bv.to_owned();
+        assert!(owned.is_tensor());
+        assert_eq!(
+            owned.as_tensor().unwrap().as_slice::<i64>(),
+            Some(&[1i64, 2, 3][..])
+        );
+        assert!(owned.as_array().is_none());
+        assert!(owned["x"].is_null());
+        assert_eq!(owned.len(), None);
+        drop(arena);
+
+        let cloned = owned.clone();
+        match (&owned, &cloned) {
+            (OwnedDataValue::Tensor(a), OwnedDataValue::Tensor(b)) => {
+                assert!(Arc::ptr_eq(a, b), "clone shares the buffer");
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(owned, cloned);
+
+        let arena2 = Bump::new();
+        let back = owned.to_arena(&arena2);
+        assert_eq!(back.to_owned(), owned);
+        assert_eq!(back.as_tensor().unwrap().shape(), &[3]);
+
+        let direct = OwnedDataTensor::from_slice([3], &[1i64, 2, 3]).unwrap();
+        let v = crate::owned_json!({"t": direct, "n": 1});
+        assert!(v["t"].is_tensor());
+        assert_eq!(v["t"], owned);
     }
 }

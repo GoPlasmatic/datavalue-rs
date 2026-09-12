@@ -54,6 +54,8 @@ impl Serialize for DataValue<'_> {
             DataValue::DateTime(d) => serializer.collect_str(&d),
             #[cfg(feature = "datetime")]
             DataValue::Duration(d) => serializer.collect_str(&d),
+            #[cfg(feature = "tensor")]
+            DataValue::Tensor(t) => t.serialize(serializer),
         }
     }
 }
@@ -195,6 +197,62 @@ impl<'a, 'de> Visitor<'de> for DataValueVisitor<'a, 'de> {
     }
 }
 
+// ---- Tensor: tagged map, `data` base64 in every format. ----
+
+#[cfg(feature = "tensor")]
+mod tensor_ser {
+    use serde::ser::{Serialize, SerializeMap, Serializer};
+
+    use crate::tensor::{DataTensor, KEY_DATA, KEY_DTYPE, KEY_SHAPE, OwnedDataTensor};
+
+    /// `{"tensor": {"dtype": .., "shape": [..], "data": ..}}`, with `data` a
+    /// base64 string in *every* format, binary ones included.
+    ///
+    /// A byte string would be the natural payload for msgpack or bincode and
+    /// 33% smaller, but nothing in this crate can read one back: neither
+    /// visitor implements `visit_bytes`, and the honest target for one would
+    /// be a `Bytes` variant — a third foreign type, which the crate defers to
+    /// an extension slot. Encoding uniformly keeps the documented lossy
+    /// round-trip *recoverable* instead: a tensor deserializes as a plain
+    /// `Object` whose `data` is base64, and `DataTensor::from_json_value`
+    /// rebuilds the tensor from it, in binary formats exactly as in JSON.
+    impl Serialize for DataTensor<'_> {
+        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            let mut map = serializer.serialize_map(Some(1))?;
+            map.serialize_entry(DataTensor::JSON_TAG, &Body(*self))?;
+            map.end()
+        }
+    }
+
+    impl Serialize for OwnedDataTensor {
+        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            self.view().serialize(serializer)
+        }
+    }
+
+    struct Body<'a>(DataTensor<'a>);
+
+    impl Serialize for Body<'_> {
+        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            let mut map = serializer.serialize_map(Some(3))?;
+            map.serialize_entry(KEY_DTYPE, self.0.dtype().name())?;
+            map.serialize_entry(KEY_SHAPE, self.0.shape())?;
+            map.serialize_entry(KEY_DATA, &Base64Str(self.0.data()))?;
+            map.end()
+        }
+    }
+
+    /// Streams through `collect_str`, so formats that support it (serde_json
+    /// does) never materialise the whole base64 string.
+    struct Base64Str<'b>(&'b [u8]);
+
+    impl Serialize for Base64Str<'_> {
+        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            serializer.collect_str(&crate::base64::Base64(self.0))
+        }
+    }
+}
+
 // ---- OwnedDataValue: full serde Serialize / Deserialize, no seed needed. ----
 
 impl Serialize for OwnedDataValue {
@@ -228,6 +286,9 @@ impl Serialize for OwnedDataValue {
             OwnedDataValue::DateTime(d) => serializer.collect_str(d),
             #[cfg(feature = "datetime")]
             OwnedDataValue::Duration(d) => serializer.collect_str(d),
+            // Deref rather than `Arc<T>: Serialize`, which needs serde's `rc` feature.
+            #[cfg(feature = "tensor")]
+            OwnedDataValue::Tensor(t) => (**t).serialize(serializer),
         }
     }
 }
@@ -400,6 +461,240 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&v).unwrap(),
             r#""2024-01-15T12:30:45Z""#
+        );
+    }
+
+    #[cfg(feature = "tensor")]
+    #[test]
+    fn tensor_serializes_as_tagged_base64_for_json() {
+        use crate::tensor::{DType, DataTensor};
+        let arena = Bump::new();
+        let t =
+            DataTensor::from_slice_in(&[2, 3], &[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], &arena).unwrap();
+        let v = DataValue::tensor_in(t, &arena);
+        let expected =
+            r#"{"tensor":{"dtype":"f32","shape":[2,3],"data":"AACAPwAAAEAAAEBAAACAQAAAoEAAAMBA"}}"#;
+        assert_eq!(serde_json::to_string(&v).unwrap(), expected);
+        assert_eq!(serde_json::to_string(&v.to_owned()).unwrap(), expected);
+        assert_eq!(serde_json::to_string(&t).unwrap(), expected);
+        assert_eq!(serde_json::to_string(&v).unwrap(), v.to_string());
+
+        // Deserialize never produces Tensor: the tagged form is an Object.
+        let back: OwnedDataValue = serde_json::from_str(expected).unwrap();
+        assert!(back.is_object());
+        assert!(back["tensor"]["dtype"].as_str() == Some("f32"));
+        let mut de = serde_json::Deserializer::from_str(expected);
+        let seeded = DataValueSeed::new(&arena).deserialize(&mut de).unwrap();
+        assert!(seeded.is_object());
+
+        let empty = DataTensor::from_bytes_in(DType::F64, &[0], &[], &arena).unwrap();
+        assert_eq!(
+            serde_json::to_string(&empty).unwrap(),
+            r#"{"tensor":{"dtype":"f64","shape":[0],"data":""}}"#
+        );
+    }
+
+    /// A minimal non-human-readable serializer that records what it is
+    /// handed, so what binary formats receive is observable without a
+    /// binary-format dev-dependency. `serialize_bytes` records too: if a
+    /// raw-bytes branch ever came back, the assertions below would catch it.
+    #[cfg(feature = "tensor")]
+    mod recording {
+        use core::fmt;
+
+        use serde::ser::{self, Impossible, Serialize};
+
+        #[derive(Debug)]
+        pub struct Error(String);
+        impl fmt::Display for Error {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(&self.0)
+            }
+        }
+        impl std::error::Error for Error {}
+        impl ser::Error for Error {
+            fn custom<T: fmt::Display>(msg: T) -> Self {
+                Error(msg.to_string())
+            }
+        }
+
+        #[derive(Default)]
+        pub struct Rec(pub Vec<String>);
+
+        macro_rules! prim {
+            ($($m:ident : $t:ty),* $(,)?) => {$(
+                fn $m(self, v: $t) -> Result<(), Error> {
+                    self.0.push(format!("{}:{}", stringify!($m), v));
+                    Ok(())
+                }
+            )*};
+        }
+
+        impl ser::Serializer for &mut Rec {
+            type Ok = ();
+            type Error = Error;
+            type SerializeSeq = Self;
+            type SerializeTuple = Impossible<(), Error>;
+            type SerializeTupleStruct = Impossible<(), Error>;
+            type SerializeTupleVariant = Impossible<(), Error>;
+            type SerializeMap = Self;
+            type SerializeStruct = Impossible<(), Error>;
+            type SerializeStructVariant = Impossible<(), Error>;
+
+            fn is_human_readable(&self) -> bool {
+                false
+            }
+
+            prim!(
+                serialize_bool: bool, serialize_i8: i8, serialize_i16: i16, serialize_i32: i32,
+                serialize_i64: i64, serialize_u8: u8, serialize_u16: u16, serialize_u32: u32,
+                serialize_u64: u64, serialize_f32: f32, serialize_f64: f64, serialize_char: char,
+                serialize_str: &str,
+            );
+
+            fn serialize_bytes(self, v: &[u8]) -> Result<(), Error> {
+                self.0.push(format!("bytes:{}", v.len()));
+                Ok(())
+            }
+            fn serialize_none(self) -> Result<(), Error> {
+                unimplemented!()
+            }
+            fn serialize_some<T: ?Sized + Serialize>(self, _: &T) -> Result<(), Error> {
+                unimplemented!()
+            }
+            fn serialize_unit(self) -> Result<(), Error> {
+                unimplemented!()
+            }
+            fn serialize_unit_struct(self, _: &'static str) -> Result<(), Error> {
+                unimplemented!()
+            }
+            fn serialize_unit_variant(
+                self,
+                _: &'static str,
+                _: u32,
+                _: &'static str,
+            ) -> Result<(), Error> {
+                unimplemented!()
+            }
+            fn serialize_newtype_struct<T: ?Sized + Serialize>(
+                self,
+                _: &'static str,
+                _: &T,
+            ) -> Result<(), Error> {
+                unimplemented!()
+            }
+            fn serialize_newtype_variant<T: ?Sized + Serialize>(
+                self,
+                _: &'static str,
+                _: u32,
+                _: &'static str,
+                _: &T,
+            ) -> Result<(), Error> {
+                unimplemented!()
+            }
+            fn serialize_seq(self, len: Option<usize>) -> Result<Self, Error> {
+                self.0.push(format!("seq:{}", len.unwrap_or(0)));
+                Ok(self)
+            }
+            fn serialize_tuple(self, _: usize) -> Result<Self::SerializeTuple, Error> {
+                unimplemented!()
+            }
+            fn serialize_tuple_struct(
+                self,
+                _: &'static str,
+                _: usize,
+            ) -> Result<Self::SerializeTupleStruct, Error> {
+                unimplemented!()
+            }
+            fn serialize_tuple_variant(
+                self,
+                _: &'static str,
+                _: u32,
+                _: &'static str,
+                _: usize,
+            ) -> Result<Self::SerializeTupleVariant, Error> {
+                unimplemented!()
+            }
+            fn serialize_map(self, len: Option<usize>) -> Result<Self, Error> {
+                self.0.push(format!("map:{}", len.unwrap_or(0)));
+                Ok(self)
+            }
+            fn serialize_struct(
+                self,
+                _: &'static str,
+                _: usize,
+            ) -> Result<Self::SerializeStruct, Error> {
+                unimplemented!()
+            }
+            fn serialize_struct_variant(
+                self,
+                _: &'static str,
+                _: u32,
+                _: &'static str,
+                _: usize,
+            ) -> Result<Self::SerializeStructVariant, Error> {
+                unimplemented!()
+            }
+        }
+
+        impl ser::SerializeSeq for &mut Rec {
+            type Ok = ();
+            type Error = Error;
+            fn serialize_element<T: ?Sized + Serialize>(&mut self, v: &T) -> Result<(), Error> {
+                v.serialize(&mut **self)
+            }
+            fn end(self) -> Result<(), Error> {
+                self.0.push("end".into());
+                Ok(())
+            }
+        }
+
+        impl ser::SerializeMap for &mut Rec {
+            type Ok = ();
+            type Error = Error;
+            fn serialize_key<T: ?Sized + Serialize>(&mut self, k: &T) -> Result<(), Error> {
+                k.serialize(&mut **self)
+            }
+            fn serialize_value<T: ?Sized + Serialize>(&mut self, v: &T) -> Result<(), Error> {
+                v.serialize(&mut **self)
+            }
+            fn end(self) -> Result<(), Error> {
+                self.0.push("end".into());
+                Ok(())
+            }
+        }
+    }
+
+    #[cfg(feature = "tensor")]
+    #[test]
+    fn tensor_data_is_base64_in_binary_formats_too() {
+        use crate::tensor::OwnedDataTensor;
+        let t = OwnedDataTensor::from_slice([2, 2], &[1i16, 2, 3, 4]).unwrap();
+        let v = OwnedDataValue::tensor(t);
+        let mut rec = recording::Rec::default();
+        v.serialize(&mut rec).unwrap();
+        assert_eq!(
+            rec.0,
+            vec![
+                "map:1",
+                "serialize_str:tensor",
+                "map:3",
+                "serialize_str:dtype",
+                "serialize_str:i16",
+                "serialize_str:shape",
+                "seq:2",
+                "serialize_u64:2",
+                "serialize_u64:2",
+                "end",
+                "serialize_str:data",
+                // Not `bytes:8`: the payload a binary format receives is the
+                // same base64 a JSON one does, so the tagged object it
+                // deserializes back into can be re-read by
+                // `DataTensor::from_json_value`.
+                "serialize_str:AQACAAMABAA=",
+                "end",
+                "end",
+            ]
         );
     }
 }

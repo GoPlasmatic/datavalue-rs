@@ -50,8 +50,16 @@ jobs:
       - name: Run clippy (all features)
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+      # `tensor` on its own: proves the feature compiles without `serde`.
+      - name: Run clippy (tensor only)
+        run: cargo clippy --all-targets --features tensor -- -D warnings
+
       - name: Run tests (default)
         run: cargo test
 
       - name: Run tests (all features)
         run: cargo test --all-features
+
+      - name: Run tests (tensor only)
+        run: cargo test --features tensor
+

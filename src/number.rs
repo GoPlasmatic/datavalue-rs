@@ -35,10 +35,26 @@ fn f64_as_i64_exact(value: f64) -> Option<i64> {
     }
 }
 
+/// Exclusive upper bound for a whole `f64` that fits in `u64`: exactly 2^64
+/// (`u64::MAX as f64` rounds up to it, so `<` is the correct test).
+const U64_LIMIT: f64 = 18_446_744_073_709_551_616.0;
+
 impl NumberValue {
     #[inline]
     pub fn from_i64(value: i64) -> Self {
         NumberValue::Integer(value)
+    }
+
+    /// Construct from a `u64`. Values up to `i64::MAX` stay on the integer
+    /// path; larger values fall back to `f64` — the same overflow rule the
+    /// parser and the serde visitors apply. Bypasses `from_f64` so the
+    /// fallback is not re-collapsed with saturation.
+    #[inline]
+    pub fn from_u64(value: u64) -> Self {
+        match i64::try_from(value) {
+            Ok(i) => NumberValue::Integer(i),
+            Err(_) => NumberValue::Float(value as f64),
+        }
     }
 
     /// Construct from an f64. Whole-valued floats exactly representable in
@@ -62,6 +78,23 @@ impl NumberValue {
         match *self {
             NumberValue::Integer(i) => Some(i),
             NumberValue::Float(f) => f64_as_i64_exact(f),
+        }
+    }
+
+    /// `u64` when the value is non-negative, whole, and below 2^64 — the
+    /// unsigned twin of [`as_i64`](NumberValue::as_i64): `None` rather than
+    /// an altered value when it does not fit.
+    #[inline]
+    pub fn as_u64(&self) -> Option<u64> {
+        match *self {
+            NumberValue::Integer(i) => u64::try_from(i).ok(),
+            NumberValue::Float(f) => {
+                if f.fract() == 0.0 && (0.0..U64_LIMIT).contains(&f) {
+                    Some(f as u64)
+                } else {
+                    None
+                }
+            }
         }
     }
 
@@ -351,5 +384,22 @@ mod tests {
     fn neg_overflow_falls_to_float() {
         let a = NumberValue::Integer(i64::MIN);
         assert!(matches!(a.neg(), NumberValue::Float(_)));
+    }
+
+    #[test]
+    fn u64_round_trips_through_from_u64_and_as_u64() {
+        assert_eq!(NumberValue::from_u64(7), NumberValue::Integer(7));
+        assert_eq!(NumberValue::from_u64(7).as_u64(), Some(7));
+        let big = NumberValue::from_u64(1u64 << 63);
+        assert!(matches!(big, NumberValue::Float(_)));
+        assert_eq!(big.as_u64(), Some(1u64 << 63));
+        assert_eq!(NumberValue::Integer(-1).as_u64(), None);
+        assert_eq!(NumberValue::Float(1.5).as_u64(), None);
+        assert_eq!(NumberValue::Float(-0.0).as_u64(), Some(0));
+        assert_eq!(
+            NumberValue::Float(18_446_744_073_709_551_616.0).as_u64(),
+            None
+        );
+        assert_eq!(NumberValue::Float(f64::NAN).as_u64(), None);
     }
 }

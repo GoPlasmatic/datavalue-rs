@@ -103,10 +103,9 @@ impl DataDateTime {
             && bytes[13] == b':'
             && bytes[16] == b':'
             && bytes[19] == b'Z'
+            && let Some(dt) = Self::parse_utc_fast(bytes)
         {
-            if let Some(dt) = Self::parse_utc_fast(bytes) {
-                return Some(dt);
-            }
+            return Some(dt);
         }
 
         if let Ok(dt) = DateTime::parse_from_rfc3339(s) {

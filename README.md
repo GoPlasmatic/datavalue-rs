@@ -70,6 +70,7 @@ assert_eq!(user["ages"][1].as_i64(), Some(31));
 - **`Display` + `pretty()`** — `println!("{v}")` emits compact JSON; `v.pretty()` renders the same shape as `serde_json::to_string_pretty`.
 - **`owned_json!` Macro** — `serde_json::json!`-style construction for `OwnedDataValue`.
 - **Optional `datetime` Extension** — `DateTime` / `Duration` variants backed by `chrono`, mirroring `datalogic-rs`.
+- **Optional `tensor` Extension** — `Tensor` variant: an opaque n-dimensional typed buffer (`f32`, `i64`, `bf16`, …) that a JSON tree carries between operators without expanding it into `Array` nodes. Zero-copy typed views, nested-array conversion, and a `{"tensor": …}` wire form. No dependencies.
 
 ## Performance
 
@@ -123,6 +124,7 @@ required) since there's no arena lifetime to thread.
 | `serde` | off | `Serialize` for both forms; `DataValueSeed` (DeserializeSeed) for arena targets; `Deserialize` for `OwnedDataValue`. |
 | `serde_json` | off | Implies `serde`. Bidirectional `From`/`Into` between both value types and `serde_json::Value` (`OwnedDataValue::from_serde_value`, `to_serde_value`, `DataValue::from_serde_value_in`). |
 | `datetime` | off | Adds `DateTime(DataDateTime)` / `Duration(DataDuration)` variants (chrono-backed). Mirrors `datalogic-rs`. |
+| `tensor` | off | Adds `Tensor(&DataTensor)` / `Tensor(Arc<OwnedDataTensor>)` variants plus `DType`, typed views (`as_slice::<f32>()`), nested `Array` ↔ tensor conversion, and the `{"tensor": …}` JSON form. No dependencies; little-endian targets only. |
 
 ## Design Notes
 
@@ -142,10 +144,26 @@ required) since there's no arena lifetime to thread.
   produce `DateTime` / `Duration` variants. Consumers upgrade strings at
   the operator boundary via `DataDateTime::parse`. Serialization back to
   JSON emits an ISO 8601 string or `"1d:2h:3m:4s"` duration string.
+- **Tensor:** a `DataTensor` is a dtype, a shape, and one row-major,
+  contiguous, native-endian byte buffer aligned for its dtype — one
+  safetensors entry, one ONNX Runtime input, one numpy buffer, with zero
+  copies. The parser never produces it. Consumers build one from a typed
+  slice (`DataTensor::from_slice`, zero-copy), from nested JSON arrays
+  (`from_nested_in`, a typed decode into a declared dtype that refuses
+  anything that does not fit), or from the wire form
+  (`from_json_value_in`). It renders as
+  `{"tensor":{"dtype":"f32","shape":[2,3],"data":"<base64>"}}` — base64 in
+  every serde format, binary ones included — and the `Deserialize` impl and
+  the parser leave that form as an `Object` until a consumer asks for the
+  upgrade. A shape may have at most `MAX_RANK` (256) dimensions, so decoding
+  an untrusted payload cannot be turned into an unbounded recursion. `get` / `len` / `members` treat a
+  tensor as opaque. Equality is bytewise. No arithmetic, no dtype
+  conversion: those belong in the consumer.
 
 ## Status
 
-`0.1` — public API may shift before `1.0`. Built to back hot paths in
+`0.3` — public API may shift before `1.0`. Requires Rust 1.98 or newer.
+Built to back hot paths in
 `datalogic-rs` and other Plasmatic crates.
 
 ## Contributing

@@ -38,10 +38,23 @@ The crate is published as `datavalue-rs`; the library name auto-converts to `dat
 | Array | `&'a [DataValue<'a>]` | `Vec<OwnedDataValue>` |
 | Object | `&'a [(&'a str, DataValue<'a>)]` | `Vec<(String, OwnedDataValue)>` |
 | DateTime / Duration (feature-gated) | inline `DataDateTime` / `DataDuration` | same |
+| Tensor (feature-gated `tensor`) | `&'a DataTensor<'a>` (behind a reference: 40-byte header, enum stays 24) | `Arc<OwnedDataTensor>` (the one shared-ownership payload: immutable, potentially huge, clone is a refcount bump) |
 
 **Any change to one type must be mirrored in the other**: add a variant → add to both enums; add an accessor → add to both impls; add a feature-gated branch → gate both. The same applies to `Serialize` impls in `ser.rs` and the `to_owned()` / `to_arena()` conversion methods. The conversion pair is what holds them in sync at runtime; the access surface is what holds them in sync ergonomically.
 
 `DataValue` is `#[derive(Copy)]` — every variant payload must remain `Copy`. `chrono::DateTime<Utc>` and `chrono::Duration` are `Copy`, which is why `DataDateTime` / `DataDuration` are inline rather than boxed.
+
+`const` assertions in `value.rs` / `owned.rs` pin the enums at 24 / 32 bytes on 64-bit. A new variant whose payload is bigger than 16 bytes must go behind a reference (arena side) or an `Arc` / `Box` (owned side), as `Tensor` does.
+
+**Extension-slot trigger.** `Tensor` is the second foreign type after `DateTime`. If a third one is proposed (a `Decimal`, `BigInt`, `Uuid`, `Bytes`), design a generic extension slot (`DataValue::Ext(&'a dyn ExtValue)` / `OwnedDataValue::Ext(Arc<dyn ExtValue>)`) before adding a fourth concrete variant — see `proposal.md` §3.14 for the evaluated trade-offs.
+
+### Tensor (`src/tensor.rs`, feature `tensor`)
+
+Fields are private; three invariants hold for every tensor and make the single `unsafe` typed view (`as_slice::<T>()`) sound: byte length equals `dtype.byte_len(numel)`, the buffer is aligned to `dtype.align_of()`, and a `Bool` payload is all `0`/`1`. Every constructor enforces them; keep it that way. Separately from those, `MAX_RANK` (256, matching the parser's `MAX_DEPTH`) bounds `shape.len()` — not a soundness invariant but a resource limit, checked in `expected_byte_len`, which every construction path reaches before allocating and before any recursion, so a wire payload cannot drive `fill_rec` / `emit_rec` past the stack budget. Memory is native-endian, the wire form is little-endian, and big-endian targets get a `compile_error!`.
+
+`from_nested_in` / `to_nested_in` are the one place the crate decodes JSON leaves into scalars. The rule that keeps this on the right side of the no-coercion policy: the caller declares the dtype; an element that does not fit (wrong JSON type, non-whole float for an integer dtype, out of range, or overflow to a non-finite float) is a `TensorError::Element`, never a truncation, saturation, or manufactured `±inf`. That follows `as_i64()`, which returns `None` rather than altering a value. No dtype inference, no numeric strings, no truthiness.
+
+The `{"tensor": ...}` decoder (`from_json_value_in`) is strict: an unknown key inside `tensor` is an error, so a future `strides` field cannot be silently misread by an old decoder. The parser and `Deserialize` never produce `Tensor`; only that explicit call does.
 
 ### Parser (`src/parser.rs`)
 
@@ -52,7 +65,7 @@ Hand-rolled recursive-descent over `&[u8]`, single linear scan, no backtracking.
 
 `MAX_DEPTH` (256) caps recursion to keep the stack bounded on adversarial input.
 
-The parser **never produces** `DateTime` / `Duration` variants. JSON has no native datetime; consumer crates (e.g. `datalogic-rs`) upgrade `String` → `DateTime` at the operator boundary.
+The parser **never produces** `DateTime` / `Duration` / `Tensor` variants. JSON has no native datetime or tensor; consumer crates (e.g. `datalogic-rs`) upgrade `String` → `DateTime` (via `DataDateTime::parse`) and `Object` → `Tensor` (via `DataTensor::from_json_value_in`) at the operator boundary.
 
 ### Index trait dispatch
 
@@ -65,6 +78,7 @@ The arena-bound side cannot implement `Deserialize` directly because deserializa
 - `DataValue` gets `impl Serialize` only.
 - `DataValueSeed<'a> { arena: &'a Bump }` carries the arena via `DeserializeSeed`. Use this when plugging into existing serde flows (msgpack/flexbuffers/`serde_json::Deserializer`).
 - `OwnedDataValue` gets both `Serialize` and `Deserialize` directly — no seed, since there's no arena lifetime to thread.
+- A tensor serializes as the tagged map with `data` base64 in **every** format, binary ones included. No `visit_bytes` exists on either visitor, so a byte string would be write-only; uniform base64 keeps the lossy round-trip recoverable (`Object` back in, `DataTensor::from_json_value` rebuilds it). See `proposal.md` §3.7.
 
 For JSON specifically, `DataValue::from_str` (the hand-rolled parser) is faster than going through `DataValueSeed` + `serde_json::Deserializer`. The seed is for non-JSON formats and existing serde pipelines.
 

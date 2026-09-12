@@ -12,6 +12,8 @@ use bumpalo::Bump;
 #[cfg(feature = "datetime")]
 use crate::datetime::{DataDateTime, DataDuration};
 use crate::number::NumberValue;
+#[cfg(feature = "tensor")]
+use crate::tensor::DataTensor;
 
 /// Arena-allocated JSON value tree. Mirrors `serde_json::Value` in shape
 /// and access surface, but every composite payload lives in a `Bump`.
@@ -31,11 +33,21 @@ pub enum DataValue<'a> {
     /// Signed duration. Same boundary rules as `DateTime`.
     #[cfg(feature = "datetime")]
     Duration(DataDuration),
+    /// Opaque n-dimensional typed buffer. Held behind a reference so the
+    /// enum stays 24 bytes. The parser never produces this — consumers
+    /// build a [`DataTensor`] at the operator boundary.
+    #[cfg(feature = "tensor")]
+    Tensor(&'a DataTensor<'a>),
 }
 
 /// Returned by `Index` impls when a key/index is missing — matches
 /// `serde_json::Value`'s "indexing returns Null on miss" behaviour.
 pub(crate) static NULL: DataValue<'static> = DataValue::Null;
+
+// Feature-gated variants must not grow the enum: every payload is at most
+// 16 bytes plus tag, or lives behind a reference. Checked on 64-bit targets.
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(core::mem::size_of::<DataValue<'static>>() == 24);
 
 impl<'a> DataValue<'a> {
     // ---- Constructors ----
@@ -116,6 +128,11 @@ impl<'a> DataValue<'a> {
     #[inline]
     pub fn is_duration(&self) -> bool {
         matches!(self, DataValue::Duration(_))
+    }
+    #[cfg(feature = "tensor")]
+    #[inline]
+    pub fn is_tensor(&self) -> bool {
+        matches!(self, DataValue::Tensor(_))
     }
 
     // ---- Accessors ----
@@ -204,6 +221,30 @@ impl<'a> DataValue<'a> {
     #[inline]
     pub fn duration(d: DataDuration) -> Self {
         DataValue::Duration(d)
+    }
+
+    #[cfg(feature = "tensor")]
+    #[inline]
+    pub fn as_tensor(&self) -> Option<&'a DataTensor<'a>> {
+        match *self {
+            DataValue::Tensor(t) => Some(t),
+            _ => None,
+        }
+    }
+
+    /// Wrap a tensor header that already lives in the arena (or has the
+    /// required lifetime). No allocation.
+    #[cfg(feature = "tensor")]
+    #[inline]
+    pub fn tensor(t: &'a DataTensor<'a>) -> Self {
+        DataValue::Tensor(t)
+    }
+
+    /// Move a tensor header into `arena` and wrap it. One 40-byte bump.
+    #[cfg(feature = "tensor")]
+    #[inline]
+    pub fn tensor_in(t: DataTensor<'a>, arena: &'a Bump) -> Self {
+        DataValue::Tensor(arena.alloc(t))
     }
 
     /// `serde_json::Value::get`-style lookup. Accepts `&str` for object
@@ -310,6 +351,8 @@ impl<'a> PartialEq for DataValue<'a> {
             (DataValue::DateTime(a), DataValue::DateTime(b)) => a == b,
             #[cfg(feature = "datetime")]
             (DataValue::Duration(a), DataValue::Duration(b)) => a == b,
+            #[cfg(feature = "tensor")]
+            (DataValue::Tensor(a), DataValue::Tensor(b)) => a == b,
             _ => false,
         }
     }
@@ -484,5 +527,31 @@ mod tests {
         let b =
             arena.alloc_slice_copy(&[("y", DataValue::from_i64(2)), ("x", DataValue::from_i64(1))]);
         assert_eq!(DataValue::Object(a), DataValue::Object(b));
+    }
+
+    #[cfg(feature = "tensor")]
+    #[test]
+    fn tensor_variant_is_opaque_and_copy() {
+        use crate::tensor::DataTensor;
+        let arena = Bump::new();
+        let t = DataTensor::from_slice_in(&[2, 2], &[1.0f32, 2.0, 3.0, 4.0], &arena).unwrap();
+        let v = DataValue::tensor_in(t, &arena);
+        let copy = v; // Copy
+        assert!(v.is_tensor());
+        assert_eq!(v.as_tensor().unwrap().shape(), &[2, 2]);
+        assert!(v.as_array().is_none());
+        assert!(v.get(0).is_none());
+        assert!(v.get("x").is_none());
+        assert!(v[0].is_null());
+        assert_eq!(v.len(), None);
+        assert_eq!(v.members().count(), 0);
+        assert_eq!(v.entries().count(), 0);
+        assert_eq!(v, copy);
+        let other = DataValue::tensor_in(
+            DataTensor::from_slice_in(&[4], &[1.0f32, 2.0, 3.0, 4.0], &arena).unwrap(),
+            &arena,
+        );
+        assert_ne!(v, other, "shape participates in equality");
+        assert_ne!(v, DataValue::Null);
     }
 }

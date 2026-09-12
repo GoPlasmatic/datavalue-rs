@@ -213,6 +213,75 @@ fn write_duration<S: JsonSink>(
     out.write_bytes(b"s\"")
 }
 
+/// Tensor arm: `{"tensor":{"dtype":"f32","shape":[2,3],"data":"<base64>"}}`.
+/// The dtype name and the base64 payload are pure ASCII with no
+/// JSON-special bytes, so both stream raw between quotes; the payload is
+/// chunked through the sink rather than materialised.
+#[cfg(feature = "tensor")]
+fn write_tensor<S: JsonSink>(
+    out: &mut S,
+    t: crate::tensor::DataTensor<'_>,
+) -> Result<(), S::Error> {
+    out.write_bytes(b"{\"")?;
+    out.write_bytes(crate::tensor::DataTensor::JSON_TAG.as_bytes())?;
+    out.write_bytes(b"\":{\"dtype\":\"")?;
+    out.write_bytes(t.dtype().name().as_bytes())?;
+    out.write_bytes(b"\",\"shape\":[")?;
+    let mut buf = itoa::Buffer::new();
+    for (i, d) in t.shape().iter().enumerate() {
+        if i > 0 {
+            out.write_byte(b',')?;
+        }
+        out.write_bytes(buf.format(*d).as_bytes())?;
+    }
+    out.write_bytes(b"],\"data\":\"")?;
+    crate::base64::encode_into(out, t.data())?;
+    out.write_bytes(b"\"}}")
+}
+
+/// Pretty tensor arm. Same shape `serde_json::to_string_pretty` gives the
+/// tagged object: one dimension per line, `[]` for a 0-d shape.
+#[cfg(feature = "tensor")]
+fn write_tensor_pretty<S: JsonSink>(
+    out: &mut S,
+    t: crate::tensor::DataTensor<'_>,
+    depth: usize,
+) -> Result<(), S::Error> {
+    out.write_bytes(b"{\n")?;
+    write_indent(out, depth + 1)?;
+    out.write_byte(b'"')?;
+    out.write_bytes(crate::tensor::DataTensor::JSON_TAG.as_bytes())?;
+    out.write_bytes(b"\": {\n")?;
+    write_indent(out, depth + 2)?;
+    out.write_bytes(b"\"dtype\": \"")?;
+    out.write_bytes(t.dtype().name().as_bytes())?;
+    out.write_bytes(b"\",\n")?;
+    write_indent(out, depth + 2)?;
+    out.write_bytes(b"\"shape\": [")?;
+    if !t.shape().is_empty() {
+        let mut buf = itoa::Buffer::new();
+        for (i, d) in t.shape().iter().enumerate() {
+            if i > 0 {
+                out.write_byte(b',')?;
+            }
+            out.write_byte(b'\n')?;
+            write_indent(out, depth + 3)?;
+            out.write_bytes(buf.format(*d).as_bytes())?;
+        }
+        out.write_byte(b'\n')?;
+        write_indent(out, depth + 2)?;
+    }
+    out.write_bytes(b"],\n")?;
+    write_indent(out, depth + 2)?;
+    out.write_bytes(b"\"data\": \"")?;
+    crate::base64::encode_into(out, t.data())?;
+    out.write_bytes(b"\"\n")?;
+    write_indent(out, depth + 1)?;
+    out.write_bytes(b"}\n")?;
+    write_indent(out, depth)?;
+    out.write_byte(b'}')
+}
+
 #[inline]
 fn write_escape_byte<S: JsonSink>(out: &mut S, b: u8) -> Result<(), S::Error> {
     match b {
@@ -292,6 +361,8 @@ fn write_data_value<S: JsonSink>(out: &mut S, v: &DataValue<'_>) -> Result<(), S
         DataValue::DateTime(d) => write_datetime(out, &d),
         #[cfg(feature = "datetime")]
         DataValue::Duration(d) => write_duration(out, &d),
+        #[cfg(feature = "tensor")]
+        DataValue::Tensor(t) => write_tensor(out, *t),
     }
 }
 
@@ -332,6 +403,8 @@ fn write_owned_value<S: JsonSink>(out: &mut S, v: &OwnedDataValue) -> Result<(),
         OwnedDataValue::DateTime(d) => write_datetime(out, d),
         #[cfg(feature = "datetime")]
         OwnedDataValue::Duration(d) => write_duration(out, d),
+        #[cfg(feature = "tensor")]
+        OwnedDataValue::Tensor(t) => write_tensor(out, t.view()),
     }
 }
 
@@ -402,6 +475,8 @@ fn write_data_value_pretty<S: JsonSink>(
         DataValue::DateTime(d) => write_datetime(out, &d),
         #[cfg(feature = "datetime")]
         DataValue::Duration(d) => write_duration(out, &d),
+        #[cfg(feature = "tensor")]
+        DataValue::Tensor(t) => write_tensor_pretty(out, *t, depth),
     }
 }
 
@@ -456,6 +531,8 @@ fn write_owned_value_pretty<S: JsonSink>(
         OwnedDataValue::DateTime(d) => write_datetime(out, d),
         #[cfg(feature = "datetime")]
         OwnedDataValue::Duration(d) => write_duration(out, d),
+        #[cfg(feature = "tensor")]
+        OwnedDataValue::Tensor(t) => write_tensor_pretty(out, t.view(), depth),
     }
 }
 
@@ -837,5 +914,102 @@ mod tests {
         let ours = v.pretty().to_string();
         let serde: serde_json::Value = serde_json::from_str(&s).unwrap();
         assert_eq!(ours, serde_json::to_string_pretty(&serde).unwrap());
+    }
+
+    #[cfg(feature = "tensor")]
+    #[test]
+    fn tensor_compact_wire_format() {
+        use crate::tensor::{DType, DataTensor, OwnedDataTensor};
+        let arena = Bump::new();
+        let t =
+            DataTensor::from_slice_in(&[2, 3], &[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], &arena).unwrap();
+        let v = DataValue::tensor_in(t, &arena);
+        let expected =
+            r#"{"tensor":{"dtype":"f32","shape":[2,3],"data":"AACAPwAAAEAAAEBAAACAQAAAoEAAAMBA"}}"#;
+        assert_eq!(v.to_string(), expected);
+        assert_eq!(v.to_json_str_in(&arena), expected);
+        let mut buf = Vec::new();
+        v.write_json_into(&mut buf);
+        assert_eq!(buf, expected.as_bytes());
+        assert_eq!(v.to_owned().to_string(), expected);
+
+        // Nested inside a document, and the edge shapes.
+        let doc = arena.alloc_slice_copy(&[("t", v), ("n", DataValue::from_i64(1))]);
+        assert_eq!(
+            DataValue::Object(doc).to_string(),
+            format!(r#"{{"t":{expected},"n":1}}"#)
+        );
+        let scalar = OwnedDataTensor::from_slice([], &[7u8]).unwrap();
+        assert_eq!(
+            OwnedDataValue::tensor(scalar).to_string(),
+            r#"{"tensor":{"dtype":"u8","shape":[],"data":"Bw=="}}"#
+        );
+        let empty = OwnedDataTensor::from_bytes(DType::I16, [0, 3], &[]).unwrap();
+        assert_eq!(
+            OwnedDataValue::tensor(empty).to_string(),
+            r#"{"tensor":{"dtype":"i16","shape":[0,3],"data":""}}"#
+        );
+    }
+
+    #[cfg(feature = "tensor")]
+    #[test]
+    fn tensor_pretty_wire_format() {
+        use crate::tensor::{DType, DataTensor, OwnedDataTensor};
+        let arena = Bump::new();
+        let t =
+            DataTensor::from_slice_in(&[2, 3], &[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], &arena).unwrap();
+        let v = DataValue::tensor_in(t, &arena);
+        let expected = "{\n  \"tensor\": {\n    \"dtype\": \"f32\",\n    \"shape\": [\n      2,\n      3\n    ],\n    \"data\": \"AACAPwAAAEAAAEBAAACAQAAAoEAAAMBA\"\n  }\n}";
+        assert_eq!(v.pretty().to_string(), expected);
+        assert_eq!(v.to_json_pretty_str_in(&arena), expected);
+        assert_eq!(v.to_owned().pretty().to_string(), expected);
+
+        let doc = arena.alloc_slice_copy(&[("t", v)]);
+        let nested = DataValue::Object(doc).pretty().to_string();
+        assert!(nested.starts_with("{\n  \"t\": {\n    \"tensor\": {\n      \"dtype\": \"f32\","));
+        assert!(nested.ends_with("    }\n  }\n}"));
+
+        let scalar = OwnedDataTensor::from_bytes(DType::U8, [], &[7]).unwrap();
+        assert_eq!(
+            OwnedDataValue::tensor(scalar).pretty().to_string(),
+            "{\n  \"tensor\": {\n    \"dtype\": \"u8\",\n    \"shape\": [],\n    \"data\": \"Bw==\"\n  }\n}"
+        );
+    }
+
+    #[cfg(all(feature = "tensor", feature = "serde_json"))]
+    #[test]
+    fn tensor_pretty_matches_serde_json_pretty() {
+        use crate::tensor::DataTensor;
+        let arena = Bump::new();
+        for shape in [&[2usize, 3][..], &[6], &[], &[0, 6], &[1, 6, 1]] {
+            let elems: Vec<i32> = (0..shape.iter().product::<usize>() as i32).collect();
+            let t = DataTensor::from_slice_in(shape, &elems, &arena).unwrap();
+            let doc = arena.alloc_slice_copy(&[("t", DataValue::tensor_in(t, &arena))]);
+            let v = DataValue::Object(doc);
+            assert_eq!(
+                v.pretty().to_string(),
+                serde_json::to_string_pretty(&v).unwrap()
+            );
+            assert_eq!(v.to_string(), serde_json::to_string(&v).unwrap());
+        }
+    }
+
+    #[cfg(feature = "tensor")]
+    #[test]
+    fn tensor_display_matches_vec_across_chunk_boundaries() {
+        use crate::tensor::DataTensor;
+        let arena = Bump::new();
+        // 5000 bytes: crosses the 3072-byte encoder chunk and the 128-byte
+        // Display staging buffer many times.
+        let bytes: Vec<u8> = (0..5000).map(|i| (i % 251) as u8).collect();
+        let t =
+            DataTensor::from_bytes_in(crate::tensor::DType::U8, &[5000], &bytes, &arena).unwrap();
+        let v = DataValue::tensor_in(t, &arena);
+        let mut buf = Vec::new();
+        v.write_json_into(&mut buf);
+        assert_eq!(v.to_string().into_bytes(), buf);
+        let mut pretty_buf = Vec::new();
+        v.write_json_pretty_into(&mut pretty_buf);
+        assert_eq!(v.pretty().to_string().into_bytes(), pretty_buf);
     }
 }

@@ -31,6 +31,16 @@ mod datetime;
 #[cfg(feature = "serde")]
 mod ser;
 
+#[cfg(feature = "tensor")]
+mod base64;
+#[cfg(feature = "tensor")]
+mod tensor;
+
+// The tensor wire format is little-endian and typed views are native-endian;
+// rather than ship untested byte-swapping, refuse big-endian targets outright.
+#[cfg(all(feature = "tensor", target_endian = "big"))]
+compile_error!("the `tensor` feature requires a little-endian target");
+
 #[cfg(feature = "serde_json")]
 mod serde_json_bridge;
 
@@ -44,6 +54,9 @@ pub use datetime::{DataDateTime, DataDuration};
 
 #[cfg(feature = "serde")]
 pub use ser::DataValueSeed;
+
+#[cfg(feature = "tensor")]
+pub use tensor::{DType, DataTensor, Element, MAX_RANK, OwnedDataTensor, TensorError};
 
 pub use emit::Pretty;
 

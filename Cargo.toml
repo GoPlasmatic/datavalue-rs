@@ -1,11 +1,8 @@
 [package]
 name = "datavalue-rs"
-version = "0.2.3"
+version = "0.3.0"
 edition = "2024"
-# Edition 2024 stabilised in 1.85; the let-chains in parser.rs / datetime.rs
-# were rewritten to nested-if + `matches!` so the floor stays at 1.85
-# rather than 1.88 (where let-chains stabilised). Bump deliberately.
-rust-version = "1.85"
+rust-version = "1.98"
 authors = ["Harishankar Narayanan <nharishankar@gmail.com>"]
 license = "Apache-2.0"
 description = "Bump-allocated JSON value type with a built-in zero-copy parser and serde_json-style access API."
@@ -26,6 +23,12 @@ serde_json = ["serde", "dep:serde_json"]
 # DataValue::Duration, with parse/format/arithmetic helpers on the inner
 # types. Mirrors what `datalogic-rs` exposes today.
 datetime = ["dep:chrono"]
+# Tensor variant: an opaque n-dimensional typed byte buffer on both value
+# types (DataValue::Tensor / OwnedDataValue::Tensor), with typed views,
+# nested-array conversion, and a `{"tensor": ...}` JSON wire form. No
+# dependencies. The parser never produces it; consumers build it at an
+# operator boundary, like `datetime`.
+tensor = []
 
 [dependencies]
 bumpalo = { version = "3", default-features = false, features = ["collections"] }
@@ -34,7 +37,7 @@ itoa = { version = "1", default-features = false }
 ryu = { version = "1", default-features = false }
 serde = { version = "1.0", default-features = false, features = ["std"], optional = true }
 serde_json = { version = "1.0", default-features = false, features = ["std"], optional = true }
-chrono = { version = "0.4.44", default-features = false, features = ["std", "clock"], optional = true }
+chrono = { version = "0.4.45", default-features = false, features = ["std", "clock"], optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.8", default-features = false, features = ["html_reports", "cargo_bench_support"] }

@@ -79,6 +79,10 @@ impl From<&OwnedDataValue> for SjValue {
             OwnedDataValue::DateTime(d) => SjValue::String(d.to_iso_string()),
             #[cfg(feature = "datetime")]
             OwnedDataValue::Duration(d) => SjValue::String(d.to_string()),
+            // The `Serialize` impl already defines the tagged form; reuse it
+            // rather than spell the wire format a third time.
+            #[cfg(feature = "tensor")]
+            OwnedDataValue::Tensor(t) => tensor_to_sj(&t.view()),
         }
     }
 }
@@ -152,8 +156,16 @@ impl<'a> DataValue<'a> {
             DataValue::DateTime(d) => SjValue::String(d.to_iso_string()),
             #[cfg(feature = "datetime")]
             DataValue::Duration(d) => SjValue::String(d.to_string()),
+            #[cfg(feature = "tensor")]
+            DataValue::Tensor(t) => tensor_to_sj(t),
         }
     }
+}
+
+#[cfg(feature = "tensor")]
+#[inline]
+fn tensor_to_sj(t: &crate::tensor::DataTensor<'_>) -> SjValue {
+    serde_json::to_value(t).expect("a tensor serialises to a string-keyed object")
 }
 
 // ---- Number conversion -------------------------------------------------------
@@ -163,8 +175,8 @@ fn sj_number_to_native(n: &serde_json::Number) -> NumberValue {
     if let Some(i) = n.as_i64() {
         NumberValue::Integer(i)
     } else if let Some(u) = n.as_u64() {
-        // u64 above i64::MAX falls through to f64 (matches the parser's u64 path).
-        NumberValue::Float(u as f64)
+        // Above i64::MAX, so this takes `from_u64`'s f64 fallback.
+        NumberValue::from_u64(u)
     } else {
         // f64 path. `as_f64` is total on serde_json::Number unless the input
         // is a non-finite literal (which serde_json doesn't accept anyway).
@@ -246,5 +258,28 @@ mod tests {
         let v = OwnedDataValue::Number(NumberValue::Float(f64::NAN));
         let sj = v.to_serde_value();
         assert!(sj.is_null());
+    }
+
+    #[cfg(feature = "tensor")]
+    #[test]
+    fn tensor_bridges_to_tagged_value_and_never_back() {
+        use crate::tensor::{DataTensor, OwnedDataTensor};
+        let arena = Bump::new();
+        let t = DataTensor::from_slice_in(&[2], &[1u16, 2], &arena).unwrap();
+        let v = DataValue::tensor_in(t, &arena);
+        let sj = v.to_serde_value();
+        let expected: SjValue = serde_json::from_str(&v.to_string()).unwrap();
+        assert_eq!(sj, expected);
+        assert_eq!(v.to_owned().to_serde_value(), expected);
+        assert_eq!(serde_json::to_value(v).unwrap(), expected);
+
+        // Back across the bridge it is a plain Object; the boundary decoder
+        // recovers the tensor from that tree.
+        let owned = OwnedDataValue::from_serde_value(&sj);
+        assert!(owned.is_object());
+        assert_eq!(OwnedDataTensor::try_from(&owned).unwrap(), t.to_owned());
+        let arena_v = DataValue::from_serde_value_in(&sj, &arena);
+        assert!(arena_v.is_object());
+        assert_eq!(DataTensor::from_json_value_in(&arena_v, &arena).unwrap(), t);
     }
 }

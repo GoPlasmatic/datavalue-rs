@@ -126,10 +126,16 @@ fn dtype_is_a_first_class_public_type() {
     assert_eq!(DType::BF16.size_of(), 2);
     assert_eq!(DType::I64.byte_len(4), Some(32));
     assert_eq!(format!("{}", DType::F64), "f64");
-    // F16 / BF16 carry bytes but have no typed view without `tensor-half`.
+    // Every dtype carries bytes, whether or not it has a native element.
     let t = OwnedDataTensor::from_bytes(DType::BF16, [2], &[0x80, 0x3F, 0x00, 0x40]).unwrap();
     assert_eq!(t.data(), &[0x80, 0x3F, 0x00, 0x40]);
     assert!(t.as_slice::<u16>().is_none(), "no cross-dtype views");
+    // The gate a consumer branches on, in either build.
+    assert_eq!(
+        DType::BF16.has_native_element(),
+        cfg!(feature = "tensor-half")
+    );
+    assert!(DType::F32.has_native_element());
 }
 
 #[test]
@@ -208,4 +214,81 @@ fn expanded_arrays_outlive_the_tensor_they_came_from() {
         owned.view().to_nested_in(&arena).unwrap()
     }; // `owned` is gone; every element was copied into the arena.
     assert_eq!(expanded.to_string(), "[[1,2],[3,4]]");
+}
+
+#[test]
+fn aligned_buffer_is_filled_in_place_then_wrapped() {
+    // The byte-cell shape: assemble a payload one cell at a time and wrap it
+    // with no copy. `bf16` needs no `Element` impl to travel this path, so it
+    // works with or without `tensor-half`.
+    let arena = Bump::new();
+    let shape: &[usize] = arena.alloc_slice_copy(&[2, 2]);
+    let cells: [[u8; 2]; 4] = [[0x80, 0x3F], [0x00, 0x40], [0x40, 0x40], [0x80, 0x40]];
+
+    let buf = DataTensor::zeroed_bytes_in(DType::BF16, shape, &arena).unwrap();
+    let width = DType::BF16.size_of();
+    for (i, cell) in cells.iter().enumerate() {
+        buf[i * width..(i + 1) * width].copy_from_slice(cell);
+    }
+    let ptr = buf.as_ptr();
+    let t = DataTensor::from_bytes(DType::BF16, shape, buf).unwrap();
+    assert_eq!(t.data().as_ptr(), ptr, "wrapped in place, no copy");
+    assert_eq!(t.shape(), &[2, 2]);
+    assert_eq!(t.data(), &[0x80, 0x3F, 0x00, 0x40, 0x40, 0x40, 0x80, 0x40]);
+
+    // Zeroed to start, and the rank cap applies here like everywhere else.
+    let empty = DataTensor::zeroed_bytes_in(DType::F64, shape, &arena).unwrap();
+    assert_eq!(empty, [0u8; 32]);
+    assert!(matches!(
+        DataTensor::zeroed_bytes_in(DType::U8, &vec![1usize; MAX_RANK + 1], &arena),
+        Err(TensorError::RankTooHigh { .. })
+    ));
+}
+
+#[cfg(feature = "tensor-half")]
+#[test]
+fn half_dtypes_gain_typed_views_and_nested_conversion() {
+    use datavalue_rs::half::{bf16, f16};
+
+    let arena = Bump::new();
+    let shape: &[usize] = arena.alloc_slice_copy(&[2]);
+
+    // Typed view, zero-copy, exactly as for f32.
+    let backing = [f16::from_f32(1.5), f16::from_f32(-2.0)];
+    let t = DataTensor::from_slice(shape, &backing).unwrap();
+    assert_eq!(t.dtype(), DType::F16);
+    assert_eq!(t.as_slice::<f16>().unwrap(), &backing);
+    assert_eq!(t.as_slice::<bf16>(), None, "still no cross-dtype views");
+
+    // Nested arrays decode into the declared dtype and expand back.
+    let src = DataValue::from_str("[1.5,-2.0]", &arena).unwrap();
+    let decoded = DataTensor::from_nested_in(&src, DType::F16, &arena).unwrap();
+    assert_eq!(decoded.as_slice::<f16>().unwrap(), &backing);
+    assert_eq!(
+        decoded.to_nested_in(&arena).unwrap().to_string(),
+        "[1.5,-2]"
+    );
+
+    // The no-coercion rule holds: finite input that does not fit f16's range
+    // is an error, not an infinity. f16 tops out at 65504.
+    let big = DataValue::from_str("[70000,1]", &arena).unwrap();
+    assert!(matches!(
+        DataTensor::from_nested_in(&big, DType::F16, &arena),
+        Err(TensorError::Element {
+            index: 0,
+            expected: DType::F16
+        })
+    ));
+    // bf16 has f32's range, so the same literal fits there.
+    assert!(DataTensor::from_nested_in(&big, DType::BF16, &arena).is_ok());
+
+    // And the wire form round-trips through the boundary decoder.
+    let wire = DataValue::tensor_in(t, &arena).to_string();
+    assert_eq!(
+        wire,
+        r#"{"tensor":{"dtype":"f16","shape":[2],"data":"AD4AwA=="}}"#
+    );
+    let reparsed = DataValue::from_str(&wire, &arena).unwrap();
+    let back = DataTensor::from_json_value_in(&reparsed, &arena).unwrap();
+    assert_eq!(back.as_slice::<f16>().unwrap(), &backing);
 }

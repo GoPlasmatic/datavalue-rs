@@ -568,13 +568,41 @@ one thing) and the size of the encoder argue for in-tree.
 tensor = []          # no dependencies; includes typed views, decoder, nested conversion
 ```
 
-Future, additive, each optional and named for what it pulls in:
+Additive, each optional and named for what it pulls in. `tensor-half`
+shipped with v1 (a downstream byte-cell operator family asked for it); the
+rest stay future work.
 
-| Feature | Adds | Dependency |
-|---|---|---|
-| `tensor-half` | `Element for half::f16 / half::bf16`; nested conversion for `F16` / `BF16` | `half` |
-| `tensor-ndarray` | `From<ArrayViewD<T>>`, `as_ndarray::<T>()` | `ndarray` |
-| `tensor-safetensors` | `DataTensor::from_safetensors_view`, `OwnedDataTensor::to_safetensors` | `safetensors` |
+| Feature | Adds | Dependency | State |
+|---|---|---|---|
+| `tensor-half` | `Element for half::f16 / half::bf16`; nested conversion for `F16` / `BF16` | `half` | shipped |
+| `tensor-ndarray` | `From<ArrayViewD<T>>`, `as_ndarray::<T>()` | `ndarray` | future |
+| `tensor-safetensors` | `DataTensor::from_safetensors_view`, `OwnedDataTensor::to_safetensors` | `safetensors` | future |
+
+### 4.7a Building a payload in place (`zeroed_bytes_in`)
+
+`from_bytes` is zero-copy only for a buffer already aligned to
+`dtype.align_of()`, and `from_bytes_in` copies. Neither serves code that
+*assembles* a payload — a byte-cell operator family (stack, concat, unstack,
+transpose, pad, crop, gather) moving `size_of()`-byte cells — because a
+`bumpalo::collections::Vec<u8>` asks for `align_of::<u8>()`, so whether
+`into_bump_slice()` satisfies a wider dtype depends on what was allocated
+before it. Flaky alignment is worse than none: the operator passes its unit
+test and fails in a pipeline.
+
+**Decision.** `DataTensor::zeroed_bytes_in(dtype, shape, arena) -> Result<&mut [u8]>`
+returns the zeroed, aligned payload of a tensor that does not exist yet;
+the caller fills it and hands it to `from_bytes`, which wraps it with no
+copy. Invariants are unaffected — the tensor is still born in a constructor,
+and wrapping consumes the `&mut`, so a `Bool` payload cannot be edited
+behind a live view. No element type is named, so it is also the build path
+for `F16` / `BF16` without `tensor-half`. Zeroed rather than uninit: an
+uninit buffer needs a public `unsafe` assume-init contract, the memset is a
+linear pass rather than a copy pass, and `pad` / `crop` get their padding
+from it for free.
+
+No owned twin. The arena owns the allocation, so it can be handed out and
+wrapped later; owned storage lives inside the tensor, so the equivalent
+would have to be a fill closure. Add it when an owned consumer asks.
 
 ### 4.8 Nested conversion (`from_nested_in` / `to_nested_in`)
 

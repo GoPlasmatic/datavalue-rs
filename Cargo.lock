@@ -199,6 +199,7 @@ dependencies = [
  "chrono",
  "criterion",
  "fast-float2",
+ "half",
  "itoa",
  "json",
  "ryu",

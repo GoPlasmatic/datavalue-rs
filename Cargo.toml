@@ -29,19 +29,25 @@ datetime = ["dep:chrono"]
 # dependencies. The parser never produces it; consumers build it at an
 # operator boundary, like `datetime`.
 tensor = []
+# `f16` / `bf16` as native elements: typed views (`as_slice::<f16>()`) and
+# nested-array conversion for the two half dtypes, which `tensor` alone
+# carries as bytes only. Purely additive — `DType::has_native_element`
+# starts reporting them, and nothing else about a tensor changes.
+tensor-half = ["tensor", "dep:half"]
 
 [dependencies]
 bumpalo = { version = "3", default-features = false, features = ["collections"] }
 fast-float2 = { version = "0.2", default-features = false, features = ["std"] }
 itoa = { version = "1", default-features = false }
 ryu = { version = "1", default-features = false }
-serde = { version = "1.0.100", default-features = false, features = ["std"], optional = true }
-serde_json = { version = "1.0.61", default-features = false, features = ["std"], optional = true }
+serde = { version = "1.0.229", default-features = false, features = ["std"], optional = true }
+serde_json = { version = "1.0.151", default-features = false, features = ["std"], optional = true }
 chrono = { version = "0.4.45", default-features = false, features = ["std"], optional = true }
+half = { version = "2", default-features = false, optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.8", default-features = false, features = ["html_reports", "cargo_bench_support"] }
-serde_json = { version = "1.0.61", default-features = false, features = ["std"] }
+serde_json = { version = "1.0.151", default-features = false, features = ["std"] }
 simd-json = { version = "0.18", default-features = false, features = ["serde_impl"] }
 sonic-rs = { version = "0.5", default-features = false }
 json = { version = "0.12", default-features = false }

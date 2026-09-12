@@ -63,6 +63,14 @@ jobs:
       - name: Run tests (tensor only)
         run: cargo test --features tensor
 
+      # `tensor-half` flips has_native_element and the F16/BF16 arms; the
+      # without-feature behaviour is pinned by the `tensor only` job above.
+      - name: Run clippy (tensor-half)
+        run: cargo clippy --all-targets --features tensor-half -- -D warnings
+
+      - name: Run tests (tensor-half)
+        run: cargo test --features tensor-half
+
   msrv:
     name: MSRV (rust-version in Cargo.toml)
     runs-on: ubuntu-latest

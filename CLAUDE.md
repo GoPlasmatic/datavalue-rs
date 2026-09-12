@@ -46,6 +46,8 @@ The crate is published as `datavalue-rs`; the library name auto-converts to `dat
 
 `const` assertions in `value.rs` / `owned.rs` pin the enums at 24 / 32 bytes on 64-bit. A new variant whose payload is bigger than 16 bytes must go behind a reference (arena side) or an `Arc` / `Box` (owned side), as `Tensor` does.
 
+**`tensor-half` (feature).** Adds `Element` impls for `half::f16` / `half::bf16` and the matching `fill_tensor` / `emit_nested` arms, and flips `DType::has_native_element` to `true` for those two dtypes. Purely additive: carrying the bytes (construction, rendering, the wire form) never depended on the feature, so only typed views and nested conversion change. Tests that pin the without-feature behaviour are `cfg`-gated in pairs — keep both arms.
+
 **Extension-slot trigger.** `Tensor` is the second foreign type after `DateTime`. If a third one is proposed (a `Decimal`, `BigInt`, `Uuid`, `Bytes`), design a generic extension slot (`DataValue::Ext(&'a dyn ExtValue)` / `OwnedDataValue::Ext(Arc<dyn ExtValue>)`) before adding a fourth concrete variant — see `proposal.md` §3.14 for the evaluated trade-offs.
 
 ### Tensor (`src/tensor.rs`, feature `tensor`)
@@ -89,7 +91,7 @@ Object equality is **order-insensitive** (`PartialEq` matches by key set, not ke
 ### What this crate is NOT
 
 - **No coercion, no truthiness, no cross-type conversions**. `as_i64()` returns `None` for a string `"42"`. Coercion belongs in consumer crates (e.g. `datalogic-rs`). Pull requests adding `is_truthy`, `coerce_to_*`, or string-number conversions should be redirected.
-- **No mutation**. Everything is read-mostly; the arena is the unit of mutation (reset between batches).
+- **No mutation**. Everything is read-mostly; the arena is the unit of mutation (reset between batches). The one `&mut` a caller ever sees is `DataTensor::zeroed_bytes_in`, and it hands back bytes of a tensor that does not exist yet: wrapping them with `from_bytes` consumes the borrow, so the invariants are still established by a constructor before anything can view them.
 
 ## CI
 

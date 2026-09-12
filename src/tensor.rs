@@ -22,6 +22,11 @@
 //! nested JSON, so a tagged payload from the wire cannot be expanded into
 //! a stack overflow.
 //!
+//! `F16` / `BF16` are carried as bytes by the base feature and gain typed
+//! views and nested-array conversion under `tensor-half`, which adds the
+//! `half` dependency and nothing else; [`DType::has_native_element`] is the
+//! gate to branch on.
+//!
 //! The crate carries bytes and typed *views* of them. It does not convert
 //! between dtypes and does no arithmetic; those belong to consumers. The
 //! one place elements are decoded is the nested-array conversion, which is
@@ -110,11 +115,18 @@ impl DType {
     }
 
     /// Whether an [`Element`] impl exists for this dtype, i.e. whether typed
-    /// views and nested-array conversion are available. `F16` / `BF16` need
-    /// the future `tensor-half` feature.
+    /// views and nested-array conversion are available. This is the gate to
+    /// branch on: `F16` / `BF16` report `false` until the `tensor-half`
+    /// feature is enabled, and `true` once it is, with no other change to
+    /// how a tensor of that dtype behaves. Carrying the bytes — building,
+    /// rendering, decoding the wire form — never depends on it.
     #[inline]
     pub const fn has_native_element(self) -> bool {
-        !matches!(self, DType::F16 | DType::BF16)
+        if cfg!(feature = "tensor-half") {
+            true
+        } else {
+            !matches!(self, DType::F16 | DType::BF16)
+        }
     }
 
     /// Wire name: `"bool"`, `"i8"`, …, `"bf16"`, `"f64"`.
@@ -240,7 +252,7 @@ mod sealed {
 }
 
 /// Scalar types that can be viewed zero-copy from a tensor's bytes. Sealed;
-/// `F16` / `BF16` gain impls behind a future `tensor-half` feature.
+/// `half::f16` / `half::bf16` are included with the `tensor-half` feature.
 /// `usize` / `isize` are deliberately absent (platform-dependent width).
 pub trait Element: Copy + Send + Sync + 'static + sealed::Sealed {
     const DTYPE: DType;
@@ -260,6 +272,13 @@ element!(
     i32 => I32, u32 => U32, i64 => I64, u64 => U64,
     f32 => F32, f64 => F64,
 );
+
+// Both are `#[repr(transparent)]` over `u16`, so every bit pattern is a
+// valid value (NaN payloads included) and the size / alignment the dtype
+// table declares is the type's own — the same argument the other elements
+// rest on.
+#[cfg(feature = "tensor-half")]
+element!(half::f16 => F16, half::bf16 => BF16);
 
 /// View a typed slice as bytes. Every `Element` is a plain scalar with no
 /// padding, so every byte is initialised.
@@ -497,6 +516,18 @@ impl<'a> DataTensor<'a> {
     /// Wrap caller-owned bytes with no copy (an mmap'd safetensors entry, a
     /// runtime output, a slice inside an `Arc`). Validates length,
     /// alignment, and `Bool` payload.
+    ///
+    /// Zero-copy holds only for a buffer already aligned to
+    /// `dtype.align_of()`; anything else is `Misaligned`, because that
+    /// alignment is what makes [`as_slice`] sound. To assemble a payload
+    /// yourself and still avoid a copy, allocate it with
+    /// [`zeroed_bytes_in`] and wrap the result here;
+    /// [`from_bytes_in`] is the copying fallback for a buffer you do not
+    /// control.
+    ///
+    /// [`as_slice`]: DataTensor::as_slice
+    /// [`zeroed_bytes_in`]: DataTensor::zeroed_bytes_in
+    /// [`from_bytes_in`]: DataTensor::from_bytes_in
     pub fn from_bytes(
         dtype: DType,
         shape: &'a [usize],
@@ -519,6 +550,11 @@ impl<'a> DataTensor<'a> {
 
     /// Copy `shape` and `data` into `arena`. The copy is aligned for
     /// `dtype`, so misaligned input (a wire buffer) becomes a valid tensor.
+    /// Copies to guarantee alignment. When the payload is yours to build,
+    /// [`zeroed_bytes_in`] + [`from_bytes`] does it in one pass instead.
+    ///
+    /// [`zeroed_bytes_in`]: DataTensor::zeroed_bytes_in
+    /// [`from_bytes`]: DataTensor::from_bytes
     pub fn from_bytes_in(
         dtype: DType,
         shape: &[usize],
@@ -530,6 +566,49 @@ impl<'a> DataTensor<'a> {
         let shape: &'a [usize] = arena.alloc_slice_copy(shape);
         let data = alloc_aligned_copy(arena, data, dtype.align_of());
         Ok(Self::new_unchecked(dtype, shape, data))
+    }
+
+    /// Zeroed arena bytes, aligned for `dtype` and sized for `dtype` ×
+    /// `shape`: the payload of a tensor that does not exist yet. Fill it in
+    /// place and hand it to [`from_bytes`], which wraps it with no copy.
+    ///
+    /// This is the one route that builds a payload in a single pass. A
+    /// `bumpalo::collections::Vec<u8>` cannot stand in: it asks for
+    /// `align_of::<u8>()`, so whether `into_bump_slice()` happens to satisfy
+    /// a wider dtype depends on what was allocated before it, and
+    /// [`from_bytes`] rejects it as `Misaligned` when it does not.
+    ///
+    /// The tensor still comes into existence through a constructor, so all
+    /// three invariants are checked before anything can view the bytes —
+    /// handing out `&mut [u8]` cannot break a `Bool` payload, because
+    /// wrapping it consumes the borrow. No element type is named, so this is
+    /// also the build path for `F16` / `BF16` without `tensor-half`.
+    ///
+    /// ```
+    /// # use bumpalo::Bump;
+    /// # use datavalue_rs::{DType, DataTensor};
+    /// let arena = Bump::new();
+    /// let shape: &[usize] = arena.alloc_slice_copy(&[2, 2]);
+    /// let buf = DataTensor::zeroed_bytes_in(DType::F32, shape, &arena)?;
+    /// buf[..4].copy_from_slice(&1.5f32.to_ne_bytes());
+    /// let t = DataTensor::from_bytes(DType::F32, shape, buf)?;
+    /// assert_eq!(t.as_slice::<f32>().unwrap(), &[1.5, 0.0, 0.0, 0.0]);
+    /// # Ok::<(), datavalue_rs::TensorError>(())
+    /// ```
+    ///
+    /// [`from_bytes`]: DataTensor::from_bytes
+    // Sound for the same reason bumpalo's own `alloc_slice_fill_*` are: the
+    // memory is a fresh, exclusively owned allocation.
+    #[allow(clippy::mut_from_ref)]
+    pub fn zeroed_bytes_in(
+        dtype: DType,
+        shape: &[usize],
+        arena: &'a Bump,
+    ) -> Result<&'a mut [u8], TensorError> {
+        // Same chokepoint as every other constructor: rank and overflow are
+        // rejected here, before a byte is allocated.
+        let len = expected_byte_len(dtype, shape)?;
+        Ok(alloc_zeroed_aligned(arena, len, dtype.align_of()))
     }
 
     /// Copy a typed slice into `arena`.
@@ -932,6 +1011,21 @@ fn fill_tensor<V: Nested>(
         DType::F64 => fill(v, shape, out, dtype, |x: &V| {
             x.leaf_number().map(|n| n.as_f64())
         }),
+        // Same rule as `F32`: rounding within range is inherent, but a
+        // finite input that lands on ±inf did not fit the dtype.
+        #[cfg(feature = "tensor-half")]
+        DType::F16 => fill(v, shape, out, dtype, |x: &V| {
+            x.leaf_number()
+                .map(|n| half::f16::from_f64(n.as_f64()))
+                .filter(|f| f.is_finite())
+        }),
+        #[cfg(feature = "tensor-half")]
+        DType::BF16 => fill(v, shape, out, dtype, |x: &V| {
+            x.leaf_number()
+                .map(|n| half::bf16::from_f64(n.as_f64()))
+                .filter(|f| f.is_finite())
+        }),
+        #[cfg(not(feature = "tensor-half"))]
         DType::F16 | DType::BF16 => Err(TensorError::UnsupportedDType(dtype)),
     }
 }
@@ -1086,6 +1180,15 @@ fn emit_nested<S: NestedSink>(t: DataTensor<'_>, sink: &S) -> Result<S::Out, Ten
         DType::F64 => emit_rec(shape, view::<f64>(t), sink, &|x: f64| {
             Leaf::Num(NumberValue::from_f64(x))
         }),
+        #[cfg(feature = "tensor-half")]
+        DType::F16 => emit_rec(shape, view::<half::f16>(t), sink, &|x: half::f16| {
+            Leaf::Num(NumberValue::from_f64(x.to_f64()))
+        }),
+        #[cfg(feature = "tensor-half")]
+        DType::BF16 => emit_rec(shape, view::<half::bf16>(t), sink, &|x: half::bf16| {
+            Leaf::Num(NumberValue::from_f64(x.to_f64()))
+        }),
+        #[cfg(not(feature = "tensor-half"))]
         DType::F16 | DType::BF16 => return Err(TensorError::UnsupportedDType(t.dtype())),
     })
 }
@@ -1431,15 +1534,29 @@ mod tests {
         assert_eq!(run(r#"["42"]"#, DType::I64), err(0, DType::I64));
         assert_eq!(run("[null]", DType::F64), err(0, DType::F64));
         assert_eq!(run(r#"[{"a":1}]"#, DType::F64), err(0, DType::F64));
-        // F16 / BF16 need `tensor-half`.
-        assert_eq!(
-            run("[1]", DType::F16),
-            Err(TensorError::UnsupportedDType(DType::F16))
-        );
-        assert_eq!(
-            run("[1]", DType::BF16),
-            Err(TensorError::UnsupportedDType(DType::BF16))
-        );
+        // F16 / BF16 need `tensor-half`; without it they are bytes only.
+        #[cfg(not(feature = "tensor-half"))]
+        {
+            assert_eq!(
+                run("[1]", DType::F16),
+                Err(TensorError::UnsupportedDType(DType::F16))
+            );
+            assert_eq!(
+                run("[1]", DType::BF16),
+                Err(TensorError::UnsupportedDType(DType::BF16))
+            );
+        }
+        // With it they follow the same float rule at their own range: f16
+        // tops out at 65504, bf16 keeps f32's exponent.
+        #[cfg(feature = "tensor-half")]
+        {
+            assert_eq!(run("[1,-2.5]", DType::F16), Ok(vec![0, 0x3C, 0, 0xC1]));
+            assert_eq!(run("[65504]", DType::F16), Ok(vec![0xFF, 0x7B]));
+            assert_eq!(run("[70000]", DType::F16), err(0, DType::F16));
+            assert!(run("[70000]", DType::BF16).is_ok());
+            assert_eq!(run("[1e39]", DType::BF16), err(0, DType::BF16));
+            assert_eq!(run(r#"["1"]"#, DType::F16), err(0, DType::F16));
+        }
     }
 
     #[test]
@@ -1512,10 +1629,15 @@ mod tests {
             DType::U16
         );
         let f16 = DataTensor::from_bytes(DType::F16, &[1], &[0, 0]).unwrap();
+        #[cfg(not(feature = "tensor-half"))]
         assert_eq!(
             f16.to_nested_in(&arena),
             Err(TensorError::UnsupportedDType(DType::F16))
         );
+        // Under `tensor-half` it expands, canonicalising whole floats the
+        // same way every other float dtype does.
+        #[cfg(feature = "tensor-half")]
+        assert_eq!(f16.to_nested_in(&arena).unwrap().to_string(), "[0]");
     }
 
     #[test]

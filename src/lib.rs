@@ -58,6 +58,12 @@ pub use ser::DataValueSeed;
 #[cfg(feature = "tensor")]
 pub use tensor::{DType, DataTensor, Element, MAX_RANK, OwnedDataTensor, TensorError};
 
+/// The `half` crate, re-exported so consumers name the same `f16` / `bf16`
+/// types the `Element` impls are written against rather than a second,
+/// silently incompatible version of it.
+#[cfg(feature = "tensor-half")]
+pub use half;
+
 pub use emit::Pretty;
 
 /// Construct an [`OwnedDataValue`] from a JSON-shaped literal.

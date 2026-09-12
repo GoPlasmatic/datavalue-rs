@@ -125,6 +125,7 @@ required) since there's no arena lifetime to thread.
 | `serde_json` | off | Implies `serde`. Bidirectional `From`/`Into` between both value types and `serde_json::Value` (`OwnedDataValue::from_serde_value`, `to_serde_value`, `DataValue::from_serde_value_in`). |
 | `datetime` | off | Adds `DateTime(DataDateTime)` / `Duration(DataDuration)` variants (chrono-backed). Mirrors `datalogic-rs`. |
 | `tensor` | off | Adds `Tensor(&DataTensor)` / `Tensor(Arc<OwnedDataTensor>)` variants plus `DType`, typed views (`as_slice::<f32>()`), nested `Array` ↔ tensor conversion, and the `{"tensor": …}` JSON form. No dependencies; little-endian targets only. |
+| `tensor-half` | off | Extends `tensor` with `f16` / `bf16` as native elements: typed views and nested-array conversion for the two half dtypes, which `tensor` alone carries as bytes only. Adds the `half` dependency, re-exported as `datavalue_rs::half`. |
 
 ## Design Notes
 
@@ -150,8 +151,10 @@ required) since there's no arena lifetime to thread.
   copies. The parser never produces it. Consumers build one from a typed
   slice (`DataTensor::from_slice`, zero-copy), from nested JSON arrays
   (`from_nested_in`, a typed decode into a declared dtype that refuses
-  anything that does not fit), or from the wire form
-  (`from_json_value_in`). It renders as
+  anything that does not fit), from the wire form (`from_json_value_in`), or
+  by filling an aligned buffer in place (`zeroed_bytes_in` + `from_bytes`,
+  the single-pass route for code that assembles bytes itself);
+  `from_bytes_in` copies when a buffer's alignment is not yours to choose. It renders as
   `{"tensor":{"dtype":"f32","shape":[2,3],"data":"<base64>"}}` — base64 in
   every serde format, binary ones included — and the `Deserialize` impl and
   the parser leave that form as an `Object` until a consumer asks for the

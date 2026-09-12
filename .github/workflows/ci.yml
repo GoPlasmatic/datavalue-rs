@@ -63,3 +63,17 @@ jobs:
       - name: Run tests (tensor only)
         run: cargo test --features tensor
 
+  msrv:
+    name: MSRV (rust-version in Cargo.toml)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Pinned to the `rust-version` the manifest claims, so the claim is
+      # tested rather than asserted. Bump both together.
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.98
+
+      - name: Check (all features)
+        run: cargo check --all-features --lib

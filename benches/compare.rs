@@ -494,6 +494,8 @@ fn bench_access_canada(c: &mut Criterion) {
 // cost of materializing an arena-bound view (deep walk, string copies into
 // the arena, array/object allocations). Two variants: a fresh arena per
 // iteration vs. resetting the same arena, mirroring the parse benches.
+// `view_in` borrows strings and keys from the owned tree, so the gap to
+// `to_arena` is the string-copy share of the conversion.
 
 fn bench_convert_owned_to_arena(c: &mut Criterion) {
     for (name, input) in FIXTURES {
@@ -515,6 +517,15 @@ fn bench_convert_owned_to_arena(c: &mut Criterion) {
             b.iter(|| {
                 arena.reset();
                 let v = black_box(&owned).to_arena(&arena);
+                black_box(v);
+            });
+        });
+
+        group.bench_function("view_in (reused arena)", |b| {
+            let mut arena = Bump::new();
+            b.iter(|| {
+                arena.reset();
+                let v = black_box(&owned).view_in(&arena);
                 black_box(v);
             });
         });

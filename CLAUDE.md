@@ -42,6 +42,8 @@ The crate is published as `datavalue-rs`; the library name auto-converts to `dat
 
 **Any change to one type must be mirrored in the other**: add a variant → add to both enums; add an accessor → add to both impls; add a feature-gated branch → gate both. The same applies to `Serialize` impls in `ser.rs` and the `to_owned()` / `to_arena()` conversion methods. The conversion pair is what holds them in sync at runtime; the access surface is what holds them in sync ergonomically.
 
+`OwnedDataValue::view_in` is a third conversion with no mirror: it builds the arena form borrowing strings, keys, and tensor shape/bytes from the owned tree (only container slices and tensor headers are allocated). `DataValue` needs no counterpart, since it already is the view. Keep `view_in` and `to_arena` as two explicit matches rather than one generic walker: `to_arena`'s `&self` lifetime is independent of the arena (callers such as dataflow-rs mutate the owned tree while the copy is alive), which a shared borrowing walker cannot express. A new variant must get an arm in all three.
+
 `DataValue` is `#[derive(Copy)]` — every variant payload must remain `Copy`. `chrono::DateTime<Utc>` and `chrono::Duration` are `Copy`, which is why `DataDateTime` / `DataDuration` are inline rather than boxed.
 
 `const` assertions in `value.rs` / `owned.rs` pin the enums at 24 / 32 bytes on 64-bit. A new variant whose payload is bigger than 16 bytes must go behind a reference (arena side) or an `Arc` / `Box` (owned side), as `Tensor` does.

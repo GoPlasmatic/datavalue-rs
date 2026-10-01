@@ -110,8 +110,11 @@ assert_eq!(owned["x"].as_i64(), Some(42));
 let owned2: OwnedDataValue = r#"{"x":42}"#.parse().unwrap();
 
 // Rehydrate into a fresh arena when you need the borrowed shape again.
+// `to_arena` copies every string into the arena; `view_in` borrows them
+// from `owned2` and allocates only the array/object slices.
 let arena2 = Bump::new();
-let _borrowed = owned2.to_arena(&arena2);
+let _copied = owned2.to_arena(&arena2);
+let _viewed = owned2.view_in(&arena2); // `owned2` stays borrowed while alive
 ```
 
 `OwnedDataValue` implements `Serialize` + `Deserialize` directly (no seed

@@ -258,8 +258,11 @@ impl OwnedDataValue {
         self.to_string()
     }
 
-    /// Borrow this owned tree into the given arena, returning a
-    /// [`DataValue`] view. Strings are arena-allocated copies.
+    /// Deep-copy this owned tree into the given arena. Strings, keys, and
+    /// tensor shape and bytes are arena-allocated copies, so the result does
+    /// not borrow `self`: the owned tree may be mutated or dropped while the
+    /// view is alive. When it is only read, [`view_in`](Self::view_in)
+    /// borrows the leaves instead.
     ///
     /// Array/Object use `alloc_slice_fill_with` rather than
     /// `bumpalo::Vec::with_capacity_in` + push: one pre-sized arena
@@ -289,6 +292,54 @@ impl OwnedDataValue {
             OwnedDataValue::Duration(d) => DataValue::Duration(*d),
             #[cfg(feature = "tensor")]
             OwnedDataValue::Tensor(t) => DataValue::tensor_in(t.to_arena(arena), arena),
+        }
+    }
+
+    /// Arena view that borrows from `self`: strings, object keys, and tensor
+    /// shape and bytes point into the owned tree. Only the array/object
+    /// slices are allocated, plus one 40-byte header per tensor (what
+    /// [`DataValue::Tensor`] points at). Cost is proportional to the number
+    /// of containers, not the number of string or tensor bytes.
+    ///
+    /// `self` stays immutably borrowed for as long as the view is alive. Use
+    /// [`to_arena`](Self::to_arena) when the owned tree must be mutated or
+    /// dropped while the view exists.
+    ///
+    /// ```compile_fail
+    /// # use bumpalo::Bump;
+    /// # use datavalue_rs::OwnedDataValue;
+    /// let mut owned: OwnedDataValue = r#"{"k":"v"}"#.parse().unwrap();
+    /// let arena = Bump::new();
+    /// let view = owned.view_in(&arena);
+    /// owned = OwnedDataValue::Null; // borrowed by `view`
+    /// assert!(view.is_object());
+    /// ```
+    pub fn view_in<'a>(&'a self, arena: &'a Bump) -> DataValue<'a> {
+        match self {
+            OwnedDataValue::Null => DataValue::Null,
+            OwnedDataValue::Bool(b) => DataValue::Bool(*b),
+            OwnedDataValue::Number(n) => DataValue::Number(*n),
+            OwnedDataValue::String(s) => DataValue::String(s),
+            OwnedDataValue::Array(items) => {
+                let slice = arena.alloc_slice_fill_with(items.len(), |i| items[i].view_in(arena));
+                DataValue::Array(slice)
+            }
+            OwnedDataValue::Object(pairs) => {
+                let slice = arena.alloc_slice_fill_with(pairs.len(), |i| {
+                    let (k, v) = &pairs[i];
+                    (k.as_str(), v.view_in(arena))
+                });
+                DataValue::Object(slice)
+            }
+            #[cfg(feature = "datetime")]
+            OwnedDataValue::DateTime(d) => DataValue::DateTime(*d),
+            #[cfg(feature = "datetime")]
+            OwnedDataValue::Duration(d) => DataValue::Duration(*d),
+            // Owned storage already satisfies every tensor invariant
+            // (8-byte alignment covers every dtype), so the view is the
+            // borrowed form as-is.
+            #[cfg(feature = "tensor")]
+            OwnedDataValue::Tensor(t) => DataValue::tensor_in(t.view(), arena),
         }
     }
 }
@@ -695,6 +746,59 @@ mod tests {
         assert_eq!(back.to_owned(), owned);
     }
 
+    /// Arena bytes consumed by `f`, measured on a single pre-sized chunk.
+    fn arena_bytes_used(f: impl FnOnce(&Bump)) -> usize {
+        let arena = Bump::with_capacity(1 << 20);
+        let before = arena.chunk_capacity();
+        f(&arena);
+        before - arena.chunk_capacity()
+    }
+
+    #[test]
+    fn view_in_matches_to_arena() {
+        let owned = OwnedDataValue::from_json(
+            r#"{"s":"plain","esc":"a\"bé","n":[1,-2.5,1e300,18446744073709551616],
+                "nested":{"deep":[{"k":null},[],{}],"t":true},"empty":""}"#,
+        )
+        .unwrap();
+        let a1 = Bump::new();
+        let a2 = Bump::new();
+        let view = owned.view_in(&a1);
+        assert_eq!(view, owned.to_arena(&a2));
+        assert_eq!(view.to_owned(), owned);
+    }
+
+    #[test]
+    fn view_in_borrows_strings_and_keys() {
+        let owned = OwnedDataValue::from_json(r#"{"key":"value","list":["x"]}"#).unwrap();
+        let arena = Bump::new();
+        let view = owned.view_in(&arena);
+
+        let (owned_key, owned_val) = owned.entries().next().unwrap();
+        let (view_key, view_val) = view.as_object().unwrap()[0];
+        assert_eq!(view_key.as_ptr(), owned_key.as_ptr());
+        assert_eq!(
+            view_val.as_str().unwrap().as_ptr(),
+            owned_val.as_str().unwrap().as_ptr()
+        );
+        assert_eq!(
+            view["list"][0].as_str().unwrap().as_ptr(),
+            owned["list"][0].as_str().unwrap().as_ptr()
+        );
+
+        // Only the two object slots and the one array slot land in the arena.
+        let used = arena_bytes_used(|a| {
+            owned.view_in(a);
+        });
+        let slots = 2 * size_of::<(&str, DataValue<'_>)>() + size_of::<DataValue<'_>>();
+        assert!(used <= slots + 16, "used {used}, expected ~{slots}");
+        assert!(
+            used < arena_bytes_used(|a| {
+                owned.to_arena(a);
+            })
+        );
+    }
+
     #[test]
     fn missing_index_returns_null() {
         let v = OwnedDataValue::from_json(r#"{"a":1}"#).unwrap();
@@ -730,6 +834,31 @@ mod tests {
         );
         let back = owned.to_arena(&arena);
         assert_eq!(back, bv);
+        assert_eq!(owned.view_in(&arena), bv);
+    }
+
+    #[cfg(feature = "tensor")]
+    #[test]
+    fn view_in_borrows_tensor_shape_and_bytes() {
+        use crate::tensor::{DataTensor, OwnedDataTensor};
+        let data: Vec<f32> = (0..1024).map(|i| i as f32).collect();
+        let t = OwnedDataTensor::from_slice([4, 256], &data).unwrap();
+        let owned = OwnedDataValue::tensor(t);
+        let src = owned.as_tensor().unwrap();
+
+        let arena = Bump::new();
+        let view = owned.view_in(&arena);
+        let vt = view.as_tensor().unwrap();
+        assert_eq!(vt.data().as_ptr(), src.data().as_ptr());
+        assert_eq!(vt.shape().as_ptr(), src.shape().as_ptr());
+        assert_eq!(vt.as_slice::<f32>(), Some(&data[..]));
+        assert_eq!(view, owned.to_arena(&Bump::new()));
+
+        // The 4 KiB payload stays put; only the header is allocated.
+        let used = arena_bytes_used(|a| {
+            owned.view_in(a);
+        });
+        assert!(used <= size_of::<DataTensor<'_>>() + 8, "used {used}");
     }
 
     #[cfg(feature = "tensor")]
